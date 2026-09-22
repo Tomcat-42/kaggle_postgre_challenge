@@ -1,5 +1,5 @@
 from .sqlite_cache import SQLiteFilterCache
-from utils import split_table_name
+from pgdm.utils import split_table_name
 
 
 class FilterFacetService:

@@ -30,7 +30,13 @@ env/
 .DS_Store
 Thumbs.db
 
+# Test
+.pytest_cache/
+
 # Build / packaging
 build/
 dist/
 *.egg-info/
+
+# Claude
+.claude/

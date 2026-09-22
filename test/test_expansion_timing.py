@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from services.postgres_service import PostgresAdminService
-from ui.dialogs import ExpansionTimingReportDialog
+from pgdm.services.postgres_service import PostgresAdminService
+from pgdm.ui.dialogs import ExpansionTimingReportDialog
 
 
 class ExpansionTimingTests(unittest.TestCase):

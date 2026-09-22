@@ -59,7 +59,7 @@ On Windows, remembered credentials are encrypted for the current Windows user wi
 
 ## Synthetic challenge database
 
-[`generate_database.py`](./generate_database.py) creates the deterministic `kaggle_challenge` database used to exercise the Manager with synthetic data. See [GENERATE_DATABASE_README.md](./GENERATE_DATABASE_README.md) for the Linux server setup, SSH tunnel command, resume behavior, generated metadata, and the six expansion recipes in [`SQL files`](./SQL%20files/).
+[`generate_database.py`](./tool/generate_database.py) creates the deterministic `kaggle_challenge` database used to exercise the Manager with synthetic data. See [its README](./tool/README.md) for the Linux server setup, SSH tunnel command, resume behavior, generated metadata, and the six expansion recipes in [`asset`](./asset/).
 
 ## Expansion performance report
 
