@@ -10,6 +10,7 @@ dependencies = [
     "openpyxl",
     "pandas",
     "paramiko",
+    "python-dotenv>=1.2.3",
     "reportlab",
     "xlrd",
 ]
