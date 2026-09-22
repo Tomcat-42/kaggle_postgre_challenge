@@ -1,11 +1,11 @@
 import unittest
 from pathlib import Path
 
-from services.postgres_service import PostgresAdminService
+from pgdm.services.postgres_service import PostgresAdminService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RECIPE_DIR = PROJECT_ROOT / "SQL files"
+RECIPE_DIR = PROJECT_ROOT / "asset" / "sql"
 RECIPE_DESTINATIONS = (
     ("01_table3.sql", "public.table3"),
     ("02_table4.sql", "public.table4"),

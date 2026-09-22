@@ -10,7 +10,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from reportlab.platypus.doctemplate import IndexingFlowable
 
-from config import APP_NAME, CONTROL_SCHEMA, DATA_DICTIONARY_TABLE
+from pgdm.config import APP_NAME, CONTROL_SCHEMA, DATA_DICTIONARY_TABLE
 
 
 def _paragraph_text(value) -> str:

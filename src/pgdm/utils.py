@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from config import APP_NAME, LOCAL_STORAGE_DIR
+from pgdm.config import APP_NAME, LOCAL_STORAGE_DIR
 
 
 def sql_ident(name: str) -> str:

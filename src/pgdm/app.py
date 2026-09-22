@@ -21,7 +21,7 @@ import traceback
 from datetime import datetime
 from tkinter import ttk, messagebox, filedialog
 import customtkinter as ctk
-from config import (
+from pgdm.config import (
     APP_GEOMETRY,
     APP_TITLE,
     CONTROL_DB,
@@ -30,10 +30,10 @@ from config import (
     DATA_DICTIONARY_USAGE_TABLE,
     LEGACY_CONTROL_SCHEMA,
 )
-from filter.facet_service import FilterFacetService
-from services.pdf_export import build_data_dictionary_pdf
-from services.postgres_service import OperationCancelledError, PostgresAdminService
-from ui.dialogs import (
+from pgdm.filter.facet_service import FilterFacetService
+from pgdm.services.pdf_export import build_data_dictionary_pdf
+from pgdm.services.postgres_service import OperationCancelledError, PostgresAdminService
+from pgdm.ui.dialogs import (
     AdminActionDialog,
     ColumnDeletionProgressDialog,
     ColumnActionDialog,
@@ -88,14 +88,14 @@ from ui.dialogs import (
     VersionInfoDialog,
     center_window,
 )
-from utils import (
+from pgdm.utils import (
     clear_saved_connection_credentials,
     load_saved_connection_credentials,
     save_connection_credentials,
     split_table_name,
 )
-from ui.widgets import ReadOnlyTable
-from ui.theme import apply_orange_theme
+from pgdm.ui.widgets import ReadOnlyTable
+from pgdm.ui.theme import apply_orange_theme
 
 
 class App(ctk.CTk):
@@ -7323,6 +7323,10 @@ class App(ctk.CTk):
         self.destroy()
 
 
-if __name__ == "__main__":
+def main():
     app = App()
     app.mainloop()
+
+
+if __name__ == "__main__":
+    main()

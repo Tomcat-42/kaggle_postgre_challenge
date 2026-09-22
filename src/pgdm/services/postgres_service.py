@@ -17,7 +17,7 @@ from pathlib import Path
 import paramiko
 import pandas as pd
 
-from config import (
+from pgdm.config import (
     CONTROL_DB,
     CONTROL_SCHEMA,
     DATA_DICTIONARY_TABLE,
@@ -25,7 +25,7 @@ from config import (
     LEGACY_CONTROL_SCHEMA,
     REMOTE_STORAGE_DIR,
 )
-from utils import (
+from pgdm.utils import (
     format_version_history_entry,
     int_to_version,
     slugify,

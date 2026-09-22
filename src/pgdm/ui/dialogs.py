@@ -6,8 +6,8 @@ import tkinter as tk
 import customtkinter as ctk
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from config import CONTROL_DB, CONTROL_SCHEMA
-from ui.widgets import ReadOnlyTable
+from pgdm.config import CONTROL_DB, CONTROL_SCHEMA
+from pgdm.ui.widgets import ReadOnlyTable
 
 
 def _get_window_work_area(owner):

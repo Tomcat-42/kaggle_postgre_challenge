@@ -262,7 +262,7 @@ The shared dictionary identities follow the declared foreign keys:
 
 ## Expand recipes
 
-The [`SQL files`](./SQL%20files/) directory contains the six SQL recipes for the
+The [`assets`](../../asset/) directory contains the six SQL recipes for the
 Manager's **Expand** action. Add the destinations in filename order because later
 recipes read rows inserted by earlier destinations in the same transaction:
 

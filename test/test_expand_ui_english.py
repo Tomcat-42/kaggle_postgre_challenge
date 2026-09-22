@@ -65,7 +65,7 @@ class ExpandUiEnglishTests(unittest.TestCase):
         self.assertEqual(matches, [], f"Portuguese Expand UI text found: {matches}")
 
     def test_expand_dialog_and_progress_dialog_are_in_english(self):
-        tree = _load_tree("ui/dialogs.py")
+        tree = _load_tree("src/pgdm/ui/dialogs.py")
         self.assert_has_no_portuguese_ui_text(
             [
                 _find_class(tree, "OperationProgressDialog"),
@@ -76,7 +76,7 @@ class ExpandUiEnglishTests(unittest.TestCase):
         )
 
     def test_cross_table_expansion_runtime_messages_are_in_english(self):
-        tree = _load_tree("main.py")
+        tree = _load_tree("src/pgdm/app.py")
         methods = _find_methods(
             tree,
             "App",
