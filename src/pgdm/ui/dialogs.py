@@ -271,14 +271,14 @@ class ConnectionDialog(ctk.CTkToplevel):
     # Static profiles shown in the "Server profile" dropdown. Selecting one
     # fills the fields below; fields stay editable afterwards.
     SERVER_PROFILES = {
-        "Local (Docker)": {
+        "Local (Container)": {
             "custom_host": "localhost",
             "ssh_port": "2222",
-            "ssh_username": "appuser",
-            "ssh_password": "appuser",
+            "ssh_username": "challenge",
+            "ssh_password": "challenge",
             "postgres_port": "5432",
-            "sql_username": "appuser",
-            "sql_password": "appuser",
+            "sql_username": "challenge",
+            "sql_password": "challenge",
         },
     }
 
