@@ -268,6 +268,20 @@ class DangerConfirmDialog(ctk.CTkToplevel):
 class ConnectionDialog(ctk.CTkToplevel):
     OTHER_SERVER_LABEL = "Custom"
 
+    # Static profiles shown in the "Server profile" dropdown. Selecting one
+    # fills the fields below; fields stay editable afterwards.
+    SERVER_PROFILES = {
+        "Local (Docker)": {
+            "custom_host": "localhost",
+            "ssh_port": "2222",
+            "ssh_username": "appuser",
+            "ssh_password": "appuser",
+            "postgres_port": "5432",
+            "sql_username": "appuser",
+            "sql_password": "appuser",
+        },
+    }
+
     def __init__(self, master, saved_credentials: dict | None = None):
         super().__init__(master)
 
@@ -306,8 +320,9 @@ class ConnectionDialog(ctk.CTkToplevel):
         ctk.CTkLabel(self, text="Server profile").grid(row=1, column=0, padx=20, pady=8, sticky="w")
         self.server_option_menu = ctk.CTkOptionMenu(
             self,
-            values=[self.OTHER_SERVER_LABEL],
+            values=[self.OTHER_SERVER_LABEL, *self.SERVER_PROFILES.keys()],
             variable=self.server_option_var,
+            command=self._apply_server_profile,
         )
         self.server_option_menu.grid(row=1, column=1, padx=20, pady=8, sticky="ew")
 
@@ -378,6 +393,18 @@ class ConnectionDialog(ctk.CTkToplevel):
 
         ctk.CTkButton(buttons, text="Cancel", command=self._cancel).pack(side="right", padx=(8, 0))
         ctk.CTkButton(buttons, text="Connect", command=self._confirm).pack(side="right")
+
+    def _apply_server_profile(self, profile_name):
+        profile = self.SERVER_PROFILES.get(profile_name)
+        if not profile:
+            return
+        self.host_var.set(profile.get("custom_host", ""))
+        self.ssh_port_var.set(str(profile.get("ssh_port", "")))
+        self.ssh_username_var.set(profile.get("ssh_username", ""))
+        self.ssh_password_var.set(profile.get("ssh_password", ""))
+        self.postgres_port_var.set(str(profile.get("postgres_port", "")))
+        self.sql_username_var.set(profile.get("sql_username", ""))
+        self.sql_password_var.set(profile.get("sql_password", ""))
 
     def _cancel(self):
         self.result = None
