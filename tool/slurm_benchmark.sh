@@ -302,7 +302,8 @@ echo "method,rows,run,measured_s,wall_s,inserted,peak_rss_mb,temp_storage_mb,cor
 for ROWS in "${SCALES[@]}"; do
     # Check disk space
     AVAIL_GB=$(df -BG "${LOCAL_DIR}" | tail -1 | awk '{print $4}' | tr -d 'G')
-    NEEDED_GB=$(( ROWS / 500000 + 10 ))
+    # ~4GB per 1M rows (raw_data + destinations + temp + WAL)
+    NEEDED_GB=$(( ROWS / 250000 + 10 ))
     if [ "${AVAIL_GB}" -lt "${NEEDED_GB}" ]; then
         log "━━━ ${ROWS} SKIP: need ~${NEEDED_GB}GB, only ${AVAIL_GB}GB free ━━━"
         continue
