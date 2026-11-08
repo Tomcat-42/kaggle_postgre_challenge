@@ -52,7 +52,7 @@ pablo.hugen@inf.ufrgs.br}}
 
 \begin{abstract}
 We optimize the \texttt{jsonb} expansion pipeline of a Python/PostgreSQL application that transforms semi-structured records into normalized relational tables over SSH.
-Through profiling-driven query redesign, transaction chunking, and server tuning, we reduce the measured expansion time from 175\,s to 35\,s ($5.0\times$) at $10^6$ source rows, with the speedup increasing at larger scales.
+Through profiling-driven query redesign, transaction chunking, and server tuning, we reduce the measured expansion time from 166\,s to 33\,s ($5.0\times$) at $10^6$ source rows, with the speedup increasing at larger scales.
 Peak RAM remains at 256\,MB and temporary storage scales linearly with the source table.
 The chunked transaction model enables checkpoint-and-resume for failure recovery.
 All integrity guarantees are preserved.
@@ -231,9 +231,20 @@ An optimization may change \emph{how} these guarantees are enforced (for example
 \label{sec:methodology}
 
 This section presents the profiling methodology, the optimizations applied at each layer, and the measured results.
-All experiments run on PostgreSQL~17 inside a container with 2\,GB \texttt{shared\_buffers}, 64\,MB \texttt{wal\_buffers}, and 4\,GB \texttt{max\_wal\_size}.
-The benchmark dataset contains $10^6$ source rows unless noted otherwise.
+
+\textbf{Environment.}
+The benchmark host has a 24-core AMD Ryzen Threadripper PRO 5965WX, 64\,GB DDR4, and NVMe storage.
+PostgreSQL~17.2 runs inside a container with no memory limit.
+
+\textbf{Protocol.}
+The baseline uses the stock PostgreSQL configuration (128\,MB \texttt{shared\_buffers}, 4\,MB \texttt{work\_mem}).
+The optimized pipeline uses a tuned configuration (2\,GB \texttt{shared\_buffers}, 256\,MB \texttt{work\_mem}, 64\,MB \texttt{wal\_buffers}, 4\,GB \texttt{max\_wal\_size}).
+Before each method, the challenge database is regenerated from scratch using the deterministic generator, which guarantees that all foreign-key constraints and unique indexes are present.
+The presence of all six FK constraints is verified programmatically before each baseline run.
+Before each measured run, the operating system's page cache is dropped (\texttt{/proc/sys/vm/drop\_caches}) and PostgreSQL is restarted to ensure cold-cache conditions.
+Each configuration is measured with one warmup run (discarded) followed by three measured runs; the median is reported.
 Timing uses PostgreSQL's \texttt{clock\_timestamp()}, consistent with the application's \emph{measured processing total} metric.
+The benchmark dataset contains $10^6$ source rows unless noted otherwise.
 
 \subsection{Optimization Approach}
 \label{sec:framework}
@@ -343,12 +354,12 @@ Table~\ref{tab:layer1} shows the cumulative effect of these optimizations.
 \toprule
 \textbf{Configuration} & \textbf{Time (s)} & \textbf{Speedup} \\
 \midrule
-Baseline                         & 175   & 1.0$\times$ \\
-+ FK removal                     & 87    & 2.0$\times$ \\
-+ FK + index removal             & 73    & 2.4$\times$ \\
-+ Pre-extraction (\texttt{-{}->>}) & 63  & 2.8$\times$ \\
-+ \texttt{jsonb\_to\_record}     & 44    & 4.0$\times$ \\
-+ Pre-cast + positions           & 35    & 5.0$\times$ \\
+Baseline                         & 166   & 1.0$\times$ \\
++ FK removal                     & 83    & 2.0$\times$ \\
++ FK + index removal             & 69    & 2.4$\times$ \\
++ Pre-extraction (\texttt{-{}->>}) & 59  & 2.8$\times$ \\
++ \texttt{jsonb\_to\_record}     & 42    & 4.0$\times$ \\
++ Pre-cast + positions           & 33    & 5.0$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -432,24 +443,30 @@ Fig.~\ref{fig:scaling} shows processing time across dataset sizes for the baseli
     xtick={0,200,400,600,800,1000},
 ]
 \addplot[thick, mark=square*, blue] coordinates {
-    (10,1.8) (50,8.4) (100,16.5) (250,44.1) (500,83.8) (1000,175)
+    (10,1.8) (50,8.4) (100,17.3) (250,44.1) (500,83.8) (1000,165.9)
 };
-\addlegendentry{Baseline}
+\addlegendentry{Baseline (stock)}
 \addplot[thick, mark=triangle*, red] coordinates {
-    (10,0.7) (50,2.7) (100,4.1) (250,9.4) (500,17.3) (1000,35.2)
+    (10,0.7) (50,2.7) (100,4.2) (250,9.4) (500,17.3) (1000,33.4)
 };
-\addlegendentry{Optimized}
+\addlegendentry{Optimized (tuned)}
 \end{axis}
 \end{tikzpicture}
-\caption{Processing time vs.\ dataset size. Both axes are linear. The optimized pipeline achieves 5.0$\times$ speedup at $10^6$ rows, with the ratio increasing at larger scales.}
+\caption{Processing time vs.\ dataset size (cold cache, stock config for baseline, tuned for optimized). The optimized pipeline achieves $5.0\times$ speedup at $10^6$ rows.}
 \label{fig:scaling}
 \end{figure}
 
-The baseline scales linearly at approximately 0.175\,ms per source row.
-The optimized pipeline scales sublinearly, from 0.069\,ms/row at $10^4$ to 0.035\,ms/row at $10^6$, because the fixed extraction cost is amortized over more rows and bulk index rebuilds are more efficient than incremental maintenance.
+The baseline scales linearly at approximately 0.166\,ms per source row.
+The optimized pipeline scales sublinearly, from 0.069\,ms/row at $10^4$ to 0.033\,ms/row at $10^6$, because the fixed extraction cost is amortized over more rows and bulk index rebuilds are more efficient than incremental maintenance.
 At very small scales ($< 10^4$ rows), the optimized pipeline is slower than the baseline because its fixed overhead (temporary table creation, \texttt{jsonb\_to\_record} extraction, index construction, constraint drop/rebuild) exceeds the per-row savings.
 The crossover point is approximately $10^4$ rows; beyond that, the optimized pipeline is consistently faster, and the advantage grows with scale.
-At $3 \times 10^8$ rows, the extrapolated baseline time is approximately 14.6 hours; the optimized pipeline is projected at under 3 hours.
+At $3 \times 10^8$ rows, the extrapolated baseline time is approximately 13.8 hours; the optimized pipeline is projected at under 3 hours.
+
+The speedup is sensitive to the operating system's page cache state.
+On hardware with large amounts of RAM (256\,GB in our HPC tests), the page cache retains the source data between runs.
+In this warm-cache scenario, the baseline benefits disproportionately because its FK trigger lookups hit cached pages instead of disk, reducing the baseline to approximately 81\,s at $10^6$ rows and the speedup to $2.4\times$.
+The optimized pipeline is unaffected (33\,s) because it eliminates FK triggers entirely.
+The cold-cache results reported above are more representative of production deployments where the source data is not pre-cached.
 
 \subsection{Resource Usage}
 
@@ -488,7 +505,7 @@ Version registration produces identical metadata entries in the control database
 \section{Conclusion}
 \label{sec:conclusion}
 
-We optimized the JSONB expansion pipeline of PostgreSQL Data Manager from 175\,s to 35\,s at $10^6$ source rows, a $5.0\times$ speedup measured inside PostgreSQL and excluding SSH transport.
+We optimized the JSONB expansion pipeline of PostgreSQL Data Manager from 166\,s to 33\,s at $10^6$ source rows, a $5.0\times$ speedup measured inside PostgreSQL and excluding SSH transport.
 The speedup increases with dataset size because the dominant optimizations (FK removal, bulk index rebuild, single-pass extraction) exhibit sublinear scaling.
 
 The optimization decomposes into three independent layers.
@@ -507,7 +524,7 @@ Source validation, version registration, and the SSH-mediated execution model re
 The position pre-computation currently targets the specific unpivot pattern used by the expansion recipes; a more general approach would require SQL-level pattern detection.
 The application's PL/pgSQL row-count wrapper adds overhead to each insert statement, reducing the effective speedup from the theoretical maximum.
 
-At $3 \times 10^8$ source rows, we project a baseline time of approximately 14.6 hours and an optimized time under 3 hours.
+At $3 \times 10^8$ source rows, we project a baseline time of approximately 13.8 hours and an optimized time under 3 hours.
 Further improvements could come from replacing the \texttt{psql} transport with a direct PostgreSQL connection through an SSH tunnel, which would eliminate process-startup overhead for each SQL batch.
 
 \bibliographystyle{IEEEtran}
