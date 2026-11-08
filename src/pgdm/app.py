@@ -5436,7 +5436,7 @@ class App(ctk.CTk):
                 "Environment ready.",
             )
 
-            result = self.service.execute_cross_table_expansion(
+            result = self.service.execute_optimized_cross_table_expansion(
                 database_name=database_name,
                 source_full_table_name=source_table_name,
                 raw_schemas=expansion_request["raw_schemas"],

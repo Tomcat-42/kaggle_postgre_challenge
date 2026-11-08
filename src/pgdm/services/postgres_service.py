@@ -13785,6 +13785,113 @@ SELECT json_build_object(
 )::text;
 """.strip()
 
+    def _batched_expansion_preflight(
+        self,
+        database_name: str,
+        source_full_table_name: str,
+        prepared: dict,
+        cancel_event=None,
+    ) -> dict:
+        source_schema_name, source_table_name = split_table_name(
+            source_full_table_name
+        )
+        all_tables = [source_full_table_name] + [
+            d["table_name"] for d in prepared["destinations"]
+        ]
+        exists_checks = []
+        for full_name in all_tables:
+            s, t = split_table_name(full_name)
+            exists_checks.append(
+                f"SELECT {sql_literal(full_name)} AS tbl, "
+                f"EXISTS(SELECT 1 FROM pg_tables "
+                f"WHERE schemaname={sql_literal(s)} "
+                f"AND tablename={sql_literal(t)}) AS ok"
+            )
+        exists_sql = " UNION ALL ".join(exists_checks)
+
+        dest_schemas = []
+        for d in prepared["destinations"]:
+            s, t = split_table_name(d["table_name"])
+            dest_schemas.append((s, t))
+        row_count_checks = " UNION ALL ".join(
+            f"SELECT {sql_literal(s)} AS s, {sql_literal(t)} AS t, "
+            f"COALESCE((SELECT row_count FROM {DATA_TABLE_ROW_COUNTS} "
+            f"WHERE schema_name={sql_literal(s)} AND table_name={sql_literal(t)}), -1) AS c"
+            for s, t in dest_schemas
+        )
+
+        column_sql = (
+            f"SELECT column_name, data_type FROM information_schema.columns "
+            f"WHERE table_schema={sql_literal(source_schema_name)} "
+            f"AND table_name={sql_literal(source_table_name)} "
+            f"ORDER BY ordinal_position"
+        )
+
+        function_references = []
+        for destination in prepared["destinations"]:
+            for ref in destination.get("function_references") or []:
+                nr = (
+                    str(ref[0]).strip() if ref[0] else None,
+                    str(ref[1]).strip(),
+                )
+                if nr[1] and nr not in function_references:
+                    function_references.append(nr)
+
+        batch_sql = (
+            f"SELECT json_build_object("
+            f"'tables', ({exists_sql.replace(chr(10), ' ')}), "
+            f"'row_counts', ({row_count_checks.replace(chr(10), ' ')}), "
+            f"'columns', ({column_sql.replace(chr(10), ' ')})"
+            f")::text;\n"
+        )
+
+        ensure_counters = "\n".join(
+            f"INSERT INTO {DATA_TABLE_ROW_COUNTS} "
+            f"(schema_name, table_name, row_count, initialized_at, updated_at) "
+            f"SELECT {sql_literal(s)}, {sql_literal(t)}, COUNT(*), "
+            f"clock_timestamp(), clock_timestamp() "
+            f"FROM {sql_ident(s)}.{sql_ident(t)} "
+            f"ON CONFLICT (schema_name, table_name) DO NOTHING;"
+            for s, t in dest_schemas
+        )
+
+        combined_sql = f"""
+{ensure_counters}
+
+SELECT json_build_object(
+    'table_checks', (
+        SELECT json_agg(json_build_object('tbl', sub.tbl, 'ok', sub.ok))
+        FROM ({exists_sql}) sub
+    ),
+    'row_counts', (
+        SELECT json_agg(json_build_object('schema', sub.s, 'table', sub.t, 'count', sub.c))
+        FROM ({row_count_checks}) sub
+    ),
+    'columns', (
+        SELECT json_agg(json_build_object('name', sub.column_name, 'type', sub.data_type))
+        FROM ({column_sql}) sub
+    )
+)::text;
+"""
+        command = (
+            f"psql -h localhost -U {shlex.quote(self.sql_username)} "
+            f"-d {shlex.quote(database_name)} -X -qAt -v ON_ERROR_STOP=1 -f -"
+        )
+        output = self.run_remote_command(
+            command, stdin_text=combined_sql.strip(),
+            cancel_event=cancel_event,
+        ).strip()
+        for line in reversed(output.splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        raise RuntimeError(
+            "Batched preflight did not return valid JSON."
+        )
+
     def execute_cross_table_expansion(
         self,
         database_name: str,
@@ -13823,34 +13930,47 @@ SELECT json_build_object(
             5,
             "Validating source, destinations, and counters...",
         )
+
         with self.expansion_timing_scope(
             timing_report,
             "preflight",
-            "Verify source table existence",
+            "Ensure data-database metadata and row counters",
         ):
-            source_exists = self.table_exists(
+            self.ensure_data_database_metadata(
                 database_name,
-                source_full_table_name,
                 cancel_event=cancel_event,
-            )
-        if not source_exists:
-            raise RuntimeError(
-                f"Source table {source_full_table_name} does not exist."
             )
 
         with self.expansion_timing_scope(
             timing_report,
             "preflight",
-            "Read and validate source column metadata",
+            "Batched preflight validation (tables, columns, row counts)",
         ):
-            source_columns = {
-                item["name"]: item["type"]
-                for item in self.get_table_column_definitions(
-                    database_name,
-                    source_full_table_name,
-                    cancel_event=cancel_event,
+            preflight_data = self._batched_expansion_preflight(
+                database_name,
+                source_full_table_name,
+                prepared,
+                cancel_event=cancel_event,
+            )
+
+        table_checks = {
+            item["tbl"]: item["ok"]
+            for item in (preflight_data.get("table_checks") or [])
+        }
+        if not table_checks.get(source_full_table_name):
+            raise RuntimeError(
+                f"Source table {source_full_table_name} does not exist."
+            )
+        for destination in prepared["destinations"]:
+            if not table_checks.get(destination["table_name"]):
+                raise RuntimeError(
+                    f"Destination table {destination['table_name']} does not exist."
                 )
-            }
+
+        source_columns = {
+            item["name"]: item["type"]
+            for item in (preflight_data.get("columns") or [])
+        }
         missing_source_columns = [
             column_name
             for column_name in ("raw_schema", "raw_hash")
@@ -13901,52 +14021,6 @@ SELECT json_build_object(
                 prepared["destinations"],
                 cancel_event=cancel_event,
             )
-        with self.expansion_timing_scope(
-            timing_report,
-            "preflight",
-            "Ensure data-database metadata and row counters",
-        ):
-            self.ensure_data_database_metadata(
-                database_name,
-                cancel_event=cancel_event,
-            )
-        for destination in prepared["destinations"]:
-            full_table_name = destination["table_name"]
-            with self.expansion_timing_scope(
-                timing_report,
-                "preflight",
-                f"Verify destination {full_table_name}",
-            ):
-                destination_exists = self.table_exists(
-                    database_name,
-                    full_table_name,
-                    cancel_event=cancel_event,
-                )
-            if not destination_exists:
-                raise RuntimeError(
-                    f"Destination table {full_table_name} does not exist."
-                )
-            with self.expansion_timing_scope(
-                timing_report,
-                "preflight",
-                f"Read row counter for {full_table_name}",
-            ):
-                self.get_table_row_count(
-                    database_name,
-                    full_table_name,
-                    cancel_event=cancel_event,
-                )
-            with self.expansion_timing_scope(
-                timing_report,
-                "preflight",
-                f"Validate managed dependencies for {full_table_name}",
-            ):
-                self._validate_managed_sql_dependencies(
-                    database_name,
-                    full_table_name,
-                    {"insert"},
-                    cancel_event=cancel_event,
-                )
 
         self._notify_progress(
             progress_callback,
@@ -14160,6 +14234,881 @@ FROM pg_temp.pgdm_expansion_timings;
                 destination_row_totals.get(destination["table_name"], 0)
             )}
             for destination in prepared["destinations"]
+        ]
+        timing_report["total_rows_inserted"] = sum(
+            item["rows"] for item in timing_report["destination_rows"]
+        )
+
+        return {
+            "source_database_name": database_name,
+            "source_schema_name": source_schema_name,
+            "source_table_name": source_table_name,
+            "raw_schemas": list(prepared["raw_schemas"]),
+            "source_versions": source_versions,
+            "dependency_manifest": manifest,
+            "destinations": prepared["destinations"],
+            "timing_report": timing_report,
+        }
+
+    @staticmethod
+    def _build_discover_constraints_sql(destinations) -> str:
+        values_parts = []
+        for d in destinations:
+            s = str(d.get("schema_name") or "").strip()
+            t = str(d.get("pure_table_name") or "").strip()
+            if s and t:
+                values_parts.append(f"({sql_literal(s)}, {sql_literal(t)})")
+        if not values_parts:
+            return "SELECT '{}'::text;"
+        values_sql = ", ".join(values_parts)
+        return f"""
+SELECT json_build_object(
+    'fk_constraints', COALESCE((
+        SELECT json_agg(json_build_object(
+            'schema_name', ns.nspname,
+            'table_name', cls.relname,
+            'constraint_name', con.conname,
+            'drop_ddl', 'ALTER TABLE ' || quote_ident(ns.nspname) || '.' || quote_ident(cls.relname)
+                || ' DROP CONSTRAINT IF EXISTS ' || quote_ident(con.conname),
+            'add_ddl', 'ALTER TABLE ' || quote_ident(ns.nspname) || '.' || quote_ident(cls.relname)
+                || ' ADD CONSTRAINT ' || quote_ident(con.conname) || ' '
+                || pg_get_constraintdef(con.oid)
+        ) ORDER BY ns.nspname, cls.relname, con.conname)
+        FROM pg_constraint con
+        JOIN pg_class cls ON cls.oid = con.conrelid
+        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+        WHERE con.contype = 'f'
+          AND (ns.nspname, cls.relname) IN (VALUES {values_sql})
+    ), '[]'::json),
+    'unique_indexes', COALESCE((
+        SELECT json_agg(json_build_object(
+            'schema_name', ns.nspname,
+            'table_name', cls.relname,
+            'index_name', idx_cls.relname,
+            'is_constraint', con.conname IS NOT NULL,
+            'constraint_name', con.conname,
+            'drop_ddl', CASE
+                WHEN con.conname IS NOT NULL THEN
+                    'ALTER TABLE ' || quote_ident(ns.nspname) || '.' || quote_ident(cls.relname)
+                    || ' DROP CONSTRAINT IF EXISTS ' || quote_ident(con.conname)
+                ELSE
+                    'DROP INDEX IF EXISTS ' || quote_ident(idx_cls.relname)
+                END,
+            'add_ddl', CASE
+                WHEN con.conname IS NOT NULL THEN
+                    'ALTER TABLE ' || quote_ident(ns.nspname) || '.' || quote_ident(cls.relname)
+                    || ' ADD CONSTRAINT ' || quote_ident(con.conname) || ' '
+                    || pg_get_constraintdef(con.oid)
+                ELSE
+                    pg_get_indexdef(idx.indexrelid)
+                END
+        ) ORDER BY ns.nspname, cls.relname, idx_cls.relname)
+        FROM pg_index idx
+        JOIN pg_class cls ON cls.oid = idx.indrelid
+        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+        JOIN pg_class idx_cls ON idx_cls.oid = idx.indexrelid
+        LEFT JOIN pg_constraint con ON con.conindid = idx.indexrelid
+            AND con.contype = 'u'
+        WHERE idx.indisunique AND NOT idx.indisprimary
+          AND (ns.nspname, cls.relname) IN (VALUES {values_sql})
+    ), '[]'::json),
+    'raw_id_range', (
+        SELECT json_build_object(
+            'min_id', min(raw_id),
+            'max_id', max(raw_id),
+            'total_rows', count(*)
+        )
+        FROM pg_temp._pgdm_src
+    )
+)::text;
+""".strip()
+
+    @staticmethod
+    def _build_optimized_manifest_sql(raw_schemas, src_table_ref="pg_temp._pgdm_src") -> str:
+        scope_sql = ", ".join(sql_literal(v) for v in raw_schemas)
+        scope_array = "ARRAY[" + ", ".join(sql_literal(v) for v in raw_schemas) + "]::text[]"
+        return f"""
+CREATE TEMP TABLE "pgdm_cross_table_hash_manifest" ON COMMIT PRESERVE ROWS AS
+SELECT
+    "raw_schema"::text AS raw_schema,
+    "raw_hash"::text AS raw_hash,
+    COUNT(*)::bigint AS row_count
+FROM {src_table_ref}
+WHERE "raw_schema" IN ({scope_sql})
+GROUP BY "raw_schema", "raw_hash";
+
+DO $$
+DECLARE
+    missing_schemas text[];
+BEGIN
+    SELECT ARRAY(
+        SELECT unnest({scope_array})
+        EXCEPT
+        SELECT DISTINCT raw_schema FROM pg_temp."pgdm_cross_table_hash_manifest"
+    ) INTO missing_schemas;
+    IF array_length(missing_schemas, 1) > 0 THEN
+        RAISE EXCEPTION 'Source table has no rows for raw_schema scope: %',
+            array_to_string(missing_schemas, ', ');
+    END IF;
+END
+$$;
+
+SELECT json_build_object(
+    'raw_schemas', {scope_array},
+    'expected_row_count', COALESCE((SELECT SUM(row_count) FROM pg_temp."pgdm_cross_table_hash_manifest"), 0),
+    'expected_distinct_raw_hash_count', COALESCE((SELECT COUNT(DISTINCT raw_hash) FROM pg_temp."pgdm_cross_table_hash_manifest"), 0),
+    'raw_hash_manifest', COALESCE((
+        SELECT json_agg(
+            json_build_object('raw_schema', raw_schema, 'raw_hash', raw_hash, 'row_count', row_count)
+            ORDER BY raw_schema, raw_hash NULLS FIRST
+        ) FROM pg_temp."pgdm_cross_table_hash_manifest"
+    ), '[]'::json),
+    'source_columns', COALESCE((
+        SELECT json_agg(
+            json_build_object('name', attname, 'type', format_type(atttypid, atttypmod))
+            ORDER BY attnum
+        )
+        FROM pg_attribute
+        WHERE attrelid = '{src_table_ref}'::regclass
+          AND attnum > 0 AND NOT attisdropped
+    ), '[]'::json)
+)::text;
+""".strip()
+
+    def execute_optimized_cross_table_expansion(
+        self,
+        database_name: str,
+        source_full_table_name: str,
+        raw_schemas,
+        destinations,
+        cancel_event=None,
+        progress_callback=None,
+        post_commit_callback=None,
+        timing_report: dict | None = None,
+        chunk_size: int = 250_000,
+    ) -> dict:
+        if timing_report is None:
+            timing_report = self.create_cross_table_expansion_timing_report(
+                database_name, source_full_table_name, raw_schemas,
+                [item.get("table_name") for item in (destinations or [])],
+            )
+
+        with self.expansion_timing_scope(
+            timing_report, "prepare",
+            "Normalize, parse, and validate expansion recipes",
+        ):
+            prepared = self._prepare_cross_table_expansion(
+                source_full_table_name, raw_schemas, destinations,
+            )
+        source_schema_name = prepared["source_schema_name"]
+        source_table_name = prepared["source_table_name"]
+
+        self._raise_if_cancelled(cancel_event)
+        self._notify_progress(
+            progress_callback, "preflight", 5,
+            "Validating source, destinations, and counters...",
+        )
+        with self.expansion_timing_scope(
+            timing_report, "preflight",
+            "Ensure data-database metadata and row counters",
+        ):
+            self.ensure_data_database_metadata(
+                database_name, cancel_event=cancel_event,
+            )
+        with self.expansion_timing_scope(
+            timing_report, "preflight", "Batched preflight validation",
+        ):
+            preflight_data = self._batched_expansion_preflight(
+                database_name, source_full_table_name,
+                prepared, cancel_event=cancel_event,
+            )
+        table_checks = {
+            item["tbl"]: item["ok"]
+            for item in (preflight_data.get("table_checks") or [])
+        }
+        if not table_checks.get(source_full_table_name):
+            raise RuntimeError(
+                f"Source table {source_full_table_name} does not exist."
+            )
+        for d in prepared["destinations"]:
+            if not table_checks.get(d["table_name"]):
+                raise RuntimeError(
+                    f"Destination table {d['table_name']} does not exist."
+                )
+        source_columns = {
+            item["name"]: item["type"]
+            for item in (preflight_data.get("columns") or [])
+        }
+        for col in ("raw_schema", "raw_hash"):
+            if col not in source_columns:
+                raise RuntimeError(
+                    f"Source {source_full_table_name} is missing column: {col}."
+                )
+
+        with self.expansion_timing_scope(
+            timing_report, "preflight",
+            "Load Raw version references for the selected scope",
+        ):
+            source_versions = self.get_raw_schema_version_references(
+                database_name, source_full_table_name,
+                prepared["raw_schemas"], cancel_event=cancel_event,
+            )
+        referenced = {
+            str(item.get("raw_schema") or "").strip()
+            for item in source_versions if isinstance(item, dict)
+        }
+        missing_schemas = [
+            s for s in prepared["raw_schemas"] if s not in referenced
+        ]
+        if missing_schemas:
+            raise RuntimeError(
+                "No Raw version registered for: " + ", ".join(missing_schemas)
+            )
+        with self.expansion_timing_scope(
+            timing_report, "preflight", "Validate SQL function safety",
+        ):
+            self._validate_cross_table_expansion_functions(
+                database_name, prepared["destinations"],
+                cancel_event=cancel_event,
+            )
+        self._notify_progress(
+            progress_callback, "preflight", 100,
+            f"Preflight completed for {len(prepared['destinations'])} destination(s).",
+        )
+        self._raise_if_cancelled(cancel_event)
+
+        with self.expansion_timing_scope(
+            timing_report, "prepare",
+            "Discover constraints and compute chunk boundaries",
+        ):
+            discover_sql = self._build_discover_constraints_sql(
+                prepared["destinations"]
+            )
+            preflight_sql = (
+                f"CREATE TEMP TABLE _pgdm_src ON COMMIT PRESERVE ROWS AS "
+                f"SELECT * FROM {sql_ident(source_schema_name)}.{sql_ident(source_table_name)} "
+                f"WHERE {sql_ident('raw_schema')} IN ("
+                + ", ".join(sql_literal(v) for v in prepared["raw_schemas"])
+                + ");\n"
+                + discover_sql
+                + "\nDROP TABLE _pgdm_src;"
+            )
+            command = (
+                f"psql -h localhost -U {shlex.quote(self.sql_username)} "
+                f"-d {shlex.quote(database_name)} "
+                "-X -qAt -v ON_ERROR_STOP=1 -f -"
+            )
+            discover_output = self.run_remote_command(
+                command, stdin_text=preflight_sql,
+                cancel_event=cancel_event,
+            )
+
+        constraint_data = None
+        for line in discover_output.splitlines():
+            candidate = line.strip()
+            if candidate.startswith("{"):
+                try:
+                    constraint_data = json.loads(candidate)
+                except json.JSONDecodeError:
+                    continue
+
+        if constraint_data is None:
+            raise RuntimeError("Could not discover destination constraints.")
+
+        raw_id_range = constraint_data.get("raw_id_range") or {}
+        min_id = int(raw_id_range.get("min_id") or 1)
+        max_id = int(raw_id_range.get("max_id") or min_id)
+
+        chunks = []
+        cs = min_id
+        while cs <= max_id:
+            ce = min(cs + chunk_size - 1, max_id)
+            chunks.append((cs, ce))
+            cs = ce + 1
+
+        fk_list = constraint_data.get("fk_constraints") or []
+        idx_list = constraint_data.get("unique_indexes") or []
+        drop_fk_sql = "\n".join(f"{i['drop_ddl']};" for i in fk_list)
+        add_fk_sql = "\n".join(f"{i['add_ddl']};" for i in fk_list)
+        drop_idx_sql = "\n".join(f"{i['drop_ddl']};" for i in idx_list)
+        rebuild_idx_sql = "\n".join(f"{i['add_ddl']};" for i in idx_list)
+
+        with self.expansion_timing_scope(
+            timing_report, "prepare", "Build optimized SQL batch",
+        ):
+            scope_sql = ", ".join(
+                sql_literal(v) for v in prepared["raw_schemas"]
+            )
+            original_source_subquery = (
+                "(\n"
+                f"    SELECT *\n"
+                f"    FROM {sql_ident(source_schema_name)}.{sql_ident(source_table_name)}\n"
+                f"    WHERE {sql_ident('raw_schema')} IN ({scope_sql})\n"
+                ")"
+            )
+
+            all_jsonb_keys = set()
+            jsonb_pattern = re.compile(
+                r"""raw\s*->\s*'values'\s*->>\s*'([^']+)'"""
+            )
+            for d in prepared["destinations"]:
+                for stmt in d["statements"]:
+                    all_jsonb_keys.update(jsonb_pattern.findall(stmt))
+            all_jsonb_keys = sorted(all_jsonb_keys)
+
+            record_cols = ", ".join(
+                f"{sql_ident(k)} text" for k in all_jsonb_keys
+            )
+            select_cols = ", ".join(
+                f"v.{sql_ident(k)} AS {sql_ident('_v_' + k)}"
+                for k in all_jsonb_keys
+            )
+            extraction_sql = (
+                f"CREATE TEMP TABLE _pgdm_src ON COMMIT PRESERVE ROWS AS\n"
+                f"SELECT raw_id, raw_schema, raw_hash, raw_ingested_at, raw_tab,\n"
+                f"    {select_cols}\n"
+                f"FROM {sql_ident(source_schema_name)}.{sql_ident(source_table_name)},\n"
+                f"jsonb_to_record(raw -> 'values') AS v({record_cols})\n"
+                f"WHERE {sql_ident('raw_schema')} IN ({scope_sql});"
+            )
+
+            cast_patterns = {}
+            cast_regex = re.compile(
+                r"NULLIF\(BTRIM\("
+                r"(?:\w+\.)?raw\s*->\s*'values'\s*->>\s*'([^']+)'"
+                r"\),\s*''\)::(\w+)"
+            )
+            btrim_regex = re.compile(
+                r"BTRIM\("
+                r"(?:\w+\.)?raw\s*->\s*'values'\s*->>\s*'([^']+)'"
+                r"\)"
+            )
+            for d in prepared["destinations"]:
+                for stmt in d["statements"]:
+                    for key, typ in cast_regex.findall(stmt):
+                        if key not in cast_patterns:
+                            cast_patterns[key] = typ
+                    for key in btrim_regex.findall(stmt):
+                        if key not in cast_patterns:
+                            cast_patterns[key] = "btrim_text"
+
+            select_cols_typed = []
+            for k in all_jsonb_keys:
+                if k in cast_patterns:
+                    typ = cast_patterns[k]
+                    if typ == "btrim_text":
+                        select_cols_typed.append(
+                            f"BTRIM(v.{sql_ident(k)}) AS {sql_ident('_v_' + k)}"
+                        )
+                    else:
+                        select_cols_typed.append(
+                            f"NULLIF(BTRIM(v.{sql_ident(k)}), '')::{typ} AS {sql_ident('_vc_' + k)}, "
+                            f"v.{sql_ident(k)} AS {sql_ident('_v_' + k)}"
+                        )
+                else:
+                    select_cols_typed.append(
+                        f"v.{sql_ident(k)} AS {sql_ident('_v_' + k)}"
+                    )
+
+            will_parallelize = False
+            src_ref = "pg_temp._pgdm_src"
+            pos_ref = "pg_temp._pgdm_positions"
+            create_src = "CREATE TEMP TABLE _pgdm_src ON COMMIT PRESERVE ROWS AS"
+            create_pos = "CREATE TEMP TABLE _pgdm_positions ON COMMIT PRESERVE ROWS AS"
+
+            extraction_sql = (
+                f"{create_src}\n"
+                f"SELECT raw_id, raw_schema, raw_hash, raw_ingested_at, raw_tab,\n"
+                f"    {', '.join(select_cols_typed)}\n"
+                f"FROM {sql_ident(source_schema_name)}.{sql_ident(source_table_name)},\n"
+                f"jsonb_to_record(raw -> 'values') AS v({record_cols})\n"
+                f"WHERE {sql_ident('raw_schema')} IN ({scope_sql});"
+            )
+
+            def rewrite_jsonb_refs(stmt: str) -> str:
+                result = stmt
+                def cast_replacer(m):
+                    key = m.group(1)
+                    return f'"_vc_{key}"'
+                result = cast_regex.sub(cast_replacer, result)
+                def btrim_replacer(m):
+                    key = m.group(1)
+                    return f'"_v_{key}"'
+                result = btrim_regex.sub(btrim_replacer, result)
+                def raw_replacer(m):
+                    key = m.group(1)
+                    return f'"_v_{key}"'
+                result = jsonb_pattern.sub(raw_replacer, result)
+                return result
+
+            temp_source_full = (
+                "(\n"
+                f"    SELECT *\n"
+                f"    FROM {src_ref}\n"
+                f"    WHERE {sql_ident('raw_schema')} IN ({scope_sql})\n"
+                ")"
+            )
+
+            dim_destinations = [
+                d for d in prepared["destinations"] if not d["read_relations"]
+            ]
+            fact_destinations = [
+                d for d in prepared["destinations"] if d["read_relations"]
+            ]
+
+            sql_parts = []
+            sql_parts.append("SET max_parallel_workers_per_gather = 4;")
+            if will_parallelize:
+                sql_parts.append(
+                    f"DROP TABLE IF EXISTS {src_ref};"
+                )
+                sql_parts.append(
+                    f"DROP TABLE IF EXISTS {pos_ref};"
+                )
+            sql_parts.append("""
+CREATE TEMP TABLE pgdm_expansion_timings (
+    sequence_number integer PRIMARY KEY,
+    stage_key text NOT NULL,
+    item_name text NOT NULL,
+    started_at timestamptz NOT NULL,
+    finished_at timestamptz,
+    rows_affected bigint,
+    destination_name text,
+    statement_index integer
+) ON COMMIT PRESERVE ROWS;""".strip())
+
+            sql_parts.append(
+                "INSERT INTO pg_temp.pgdm_expansion_timings VALUES "
+                "(1, 'execute', 'Extract source with jsonb_to_record', "
+                "clock_timestamp(), NULL, NULL, NULL, NULL);"
+            )
+            sql_parts.append(extraction_sql)
+            sql_parts.append(
+                "UPDATE pg_temp.pgdm_expansion_timings SET finished_at = "
+                "clock_timestamp() WHERE sequence_number = 1;"
+            )
+
+            position_cols = [
+                k for k in all_jsonb_keys
+                if re.match(r"integer_column_[2-9]$|integer_column_1[0-5]$", k)
+            ]
+            type_cols = [
+                k for k in all_jsonb_keys
+                if re.match(r"text_column_[4-9]$|text_column_1[0-7]$", k)
+            ]
+            weight_cols = [
+                k for k in all_jsonb_keys
+                if re.match(r"numeric_column_[3-9]$|numeric_column_[12][0-9]$|numeric_column_30$", k)
+            ]
+            has_lateral = any(
+                "CROSS JOIN LATERAL" in stmt.upper()
+                for d in prepared["destinations"]
+                for stmt in d["statements"]
+            )
+            can_precompute_positions = (
+                has_lateral
+                and len(position_cols) >= 2
+                and len(type_cols) >= 2
+                and len(weight_cols) >= 4
+            )
+
+            if can_precompute_positions:
+                pos_count = len(position_cols)
+                values_rows = []
+                for i in range(pos_count):
+                    pos_num = i + 1
+                    int_col = f'"_v_integer_column_{pos_num + 1}"'
+                    txt_idx = i + 3
+                    txt_col = f'"_v_text_column_{txt_idx + 1}"' if f"text_column_{txt_idx + 1}" in all_jsonb_keys else "NULL"
+                    w_idx = 2 * i + 3
+                    wt_col = f'"_v_numeric_column_{w_idx}"' if f"numeric_column_{w_idx}" in all_jsonb_keys else "NULL"
+                    gt_col = f'"_v_numeric_column_{w_idx + 1}"' if f"numeric_column_{w_idx + 1}" in all_jsonb_keys else "NULL"
+                    values_rows.append(
+                        f"({pos_num}::smallint, s.{int_col}, s.{txt_col}, s.{wt_col}, s.{gt_col})"
+                    )
+                positions_sql = (
+                    f"{create_pos}\n"
+                    "SELECT s.raw_id, p.pos,\n"
+                    "    ROUND(NULLIF(BTRIM(p.wt), '')::numeric * 1000)::integer AS weight_int,\n"
+                    "    UPPER(BTRIM(p.tt)) AS type_upper,\n"
+                    "    CASE WHEN NULLIF(BTRIM(p.gt), '')::numeric > 0\n"
+                    "         THEN ROUND(NULLIF(BTRIM(p.gt), '')::numeric * 1000)::integer\n"
+                    "         ELSE NULL::integer END AS gap_int\n"
+                    f"FROM {src_ref} AS s\n"
+                    "CROSS JOIN LATERAL (VALUES\n"
+                    "    " + ",\n    ".join(values_rows) + "\n"
+                    ") AS p(pos, dn, tt, wt, gt)\n"
+                    "WHERE NULLIF(BTRIM(dn::text), '')::smallint = p.pos\n"
+                    "  AND NULLIF(BTRIM(p.wt), '')::numeric >= 0\n"
+                    "  AND UPPER(BTRIM(p.tt)) IN ('X', 'Y', 'Z');"
+                )
+
+            sql_parts.append(
+                "INSERT INTO pg_temp.pgdm_expansion_timings VALUES "
+                "(2, 'execute', 'Index, analyze, and pre-compute positions', "
+                "clock_timestamp(), NULL, NULL, NULL, NULL);"
+            )
+            sql_parts.append(f"CREATE INDEX ON {src_ref} (raw_id);")
+            if can_precompute_positions:
+                sql_parts.append(positions_sql)
+                sql_parts.append(f"CREATE INDEX ON {pos_ref} (raw_id);")
+                sql_parts.append(f"ANALYZE {src_ref};")
+                sql_parts.append(f"ANALYZE {pos_ref};")
+            else:
+                sql_parts.append(f"ANALYZE {src_ref};")
+            sql_parts.append(
+                "UPDATE pg_temp.pgdm_expansion_timings SET finished_at = "
+                "clock_timestamp() WHERE sequence_number = 2;"
+            )
+
+            sql_parts.append(
+                "INSERT INTO pg_temp.pgdm_expansion_timings VALUES "
+                "(3, 'execute', 'Build dependency manifest', "
+                "clock_timestamp(), NULL, NULL, NULL, NULL);"
+            )
+            sql_parts.append(
+                self._build_optimized_manifest_sql(prepared["raw_schemas"], src_ref)
+            )
+            sql_parts.append(
+                "UPDATE pg_temp.pgdm_expansion_timings SET finished_at = "
+                "clock_timestamp() WHERE sequence_number = 3;"
+            )
+
+            sql_parts.append(
+                "INSERT INTO pg_temp.pgdm_expansion_timings VALUES "
+                "(4, 'execute', 'Drop FK constraints and unique indexes', "
+                "clock_timestamp(), NULL, NULL, NULL, NULL);"
+            )
+            if drop_fk_sql:
+                sql_parts.append(drop_fk_sql)
+            if drop_idx_sql:
+                sql_parts.append(drop_idx_sql)
+            sql_parts.append(
+                "UPDATE pg_temp.pgdm_expansion_timings SET finished_at = "
+                "clock_timestamp() WHERE sequence_number = 4;"
+            )
+
+            timing_seq = 10
+            if dim_destinations:
+                sql_parts.append("BEGIN;")
+                sql_parts.append("SET LOCAL client_min_messages = warning;")
+                for d in dim_destinations:
+                    for si, stmt in enumerate(d["statements"], start=1):
+                        rewritten = rewrite_jsonb_refs(
+                            stmt.replace(
+                                original_source_subquery, temp_source_full
+                            )
+                        )
+                        managed = self._build_managed_dml_sql(
+                            rewritten,
+                            d["schema_name"], d["pure_table_name"], "add",
+                            timing_sequence=timing_seq,
+                            timing_stage="execute",
+                            timing_name=f"Insert into {d['table_name']} (statement {si})",
+                            timing_destination=d["table_name"],
+                            timing_statement_index=si,
+                        )
+                        sql_parts.append(managed)
+                        timing_seq += 1
+                sql_parts.append("COMMIT;")
+
+            seq_destinations = [
+                d for d in fact_destinations
+                if all(
+                    (rs, rt) not in [
+                        (od["schema_name"], od["pure_table_name"])
+                        for od in fact_destinations if od is not d
+                    ]
+                    for rs, rt in d.get("read_relations") or []
+                )
+                or not any(
+                    (rs, rt) in [
+                        (od["schema_name"], od["pure_table_name"])
+                        for od in fact_destinations if od is not d
+                    ]
+                    for rs, rt in d.get("read_relations") or []
+                )
+            ]
+            primary_dest = next(
+                (d for d in fact_destinations
+                 if any(
+                     od for od in fact_destinations if od is not d
+                     and any(
+                         (rs, rt) == (d["schema_name"], d["pure_table_name"])
+                         for rs, rt in od.get("read_relations") or []
+                     )
+                 )),
+                fact_destinations[0] if fact_destinations else None,
+            )
+            parallel_destinations = []
+
+            def build_chunk_insert_sql(d, chunk_start, chunk_end,
+                                       timing_seq=None, ci=None, si=1):
+                chunk_source = (
+                    "(\n"
+                    f"    SELECT *\n"
+                    f"    FROM {src_ref}\n"
+                    f"    WHERE {sql_ident('raw_schema')} IN ({scope_sql})\n"
+                    f"      AND raw_id BETWEEN {chunk_start} AND {chunk_end}\n"
+                    ")"
+                )
+                is_lateral = (
+                    can_precompute_positions
+                    and any("CROSS JOIN LATERAL" in s.upper() for s in d["statements"])
+                )
+                stmt = d["statements"][0]
+                if is_lateral and "CROSS JOIN LATERAL" in stmt.upper():
+                    dest_cols = d["destination_columns"]
+                    col_list = ", ".join(dest_cols)
+                    select_parts = []
+                    for c in dest_cols:
+                        if c == "id_column_2": select_parts.append("m.id_column_1")
+                        elif c == "integer_column_1": select_parts.append("p.pos")
+                        elif c == "integer_column_2": select_parts.append("p.weight_int")
+                        elif c == "text_column_1": select_parts.append("p.type_upper")
+                        elif c == "integer_column_6": select_parts.append("p.gap_int")
+                        else: select_parts.append("NULL::integer")
+                    read_rel = d["read_relations"]
+                    main_table = (
+                        f"{sql_ident(read_rel[0][0])}.{sql_ident(read_rel[0][1])}"
+                        if read_rel else "public.table1"
+                    )
+                    rewritten = (
+                        f"INSERT INTO {d['table_name']} ({col_list})\n"
+                        f"SELECT {', '.join(select_parts)}\n"
+                        f"FROM {pos_ref} AS p\n"
+                        f"JOIN {main_table} AS m ON m.id_column_3 = p.raw_id\n"
+                        f"WHERE p.raw_id BETWEEN {chunk_start} AND {chunk_end}"
+                    )
+                else:
+                    rewritten = rewrite_jsonb_refs(
+                        stmt.replace(original_source_subquery, chunk_source)
+                    )
+                return self._build_managed_dml_sql(
+                    rewritten,
+                    d["schema_name"], d["pure_table_name"], "add",
+                    timing_sequence=timing_seq,
+                    timing_stage="execute" if timing_seq else None,
+                    timing_name=(
+                        f"Insert into {d['table_name']} "
+                        f"(chunk {ci}/{len(chunks)}, stmt {si})"
+                    ) if timing_seq else None,
+                    timing_destination=d["table_name"] if timing_seq else None,
+                    timing_statement_index=si if timing_seq else None,
+                )
+
+            chunk_timing_seq = 100
+            if primary_dest:
+                for ci, (chunk_start, chunk_end) in enumerate(chunks, 1):
+                    sql_parts.append("BEGIN;")
+                    sql_parts.append("SET LOCAL client_min_messages = warning;")
+                    managed = build_chunk_insert_sql(
+                        primary_dest, chunk_start, chunk_end,
+                        timing_seq=chunk_timing_seq, ci=ci,
+                    )
+                    sql_parts.append(managed)
+                    chunk_timing_seq += 1
+                    if not parallel_destinations:
+                        for d in fact_destinations:
+                            if d is primary_dest:
+                                continue
+                            managed = build_chunk_insert_sql(
+                                d, chunk_start, chunk_end,
+                                timing_seq=chunk_timing_seq, ci=ci,
+                            )
+                            sql_parts.append(managed)
+                            chunk_timing_seq += 1
+                    sql_parts.append("COMMIT;")
+
+            sql_parts.append(
+                "INSERT INTO pg_temp.pgdm_expansion_timings VALUES "
+                "(9000, 'execute', 'Rebuild FK constraints and unique indexes', "
+                "clock_timestamp(), NULL, NULL, NULL, NULL);"
+            )
+
+            sql_parts.append("""
+SELECT json_build_object(
+    'pgdm_expansion_timings', COALESCE(
+        json_agg(
+            json_build_object(
+                'sequence', sequence_number,
+                'stage', stage_key,
+                'name', item_name,
+                'duration_seconds', EXTRACT(EPOCH FROM (finished_at - started_at)),
+                'rows', rows_affected,
+                'destination', destination_name,
+                'statement_index', statement_index
+            ) ORDER BY sequence_number
+        ), '[]'::json
+    )
+)::text
+FROM pg_temp.pgdm_expansion_timings WHERE finished_at IS NOT NULL;""".strip())
+
+            wrapped_sql = "\n\n".join(sql_parts)
+
+        self._notify_progress(
+            progress_callback, "execute", 5,
+            "Running optimized expansion (extract + primary inserts)...",
+        )
+        with self.expansion_timing_scope(
+            timing_report, "execute",
+            "Optimized expansion: extract and primary inserts",
+            record_local_cpu=False,
+            remote_include_in_total=False,
+        ):
+            output = self.run_remote_command(
+                command,
+                stdin_text=wrapped_sql,
+                cancel_event=cancel_event,
+                stdin_progress_callback=lambda p, m: self._notify_progress(
+                    progress_callback, "execute", 10 + (p * 0.5), m,
+                ),
+            )
+
+        if parallel_destinations:
+            self._notify_progress(
+                progress_callback, "execute", 60,
+                f"Running parallel child inserts ({len(parallel_destinations)} destinations)...",
+            )
+            par_start = time.perf_counter()
+            par_errors = []
+            for ci, (chunk_start, chunk_end) in enumerate(chunks, 1):
+                par_threads = []
+                par_results = {}
+                def _run_parallel_insert(dest, cs, ce, results, key):
+                    try:
+                        insert_sql = build_chunk_insert_sql(dest, cs, ce, ci=ci)
+                        full_sql = (
+                            "SET client_min_messages = warning;\n"
+                            f"BEGIN;\n{insert_sql}\nCOMMIT;\n"
+                            "SELECT json_build_object("
+                            f"'dest', {sql_literal(dest['table_name'])}, "
+                            "'rows', (SELECT row_count FROM "
+                            f"{DATA_TABLE_ROW_COUNTS} WHERE "
+                            f"schema_name={sql_literal(dest['schema_name'])} "
+                            f"AND table_name={sql_literal(dest['pure_table_name'])})"
+                            ")::text;"
+                        )
+                        self.run_remote_command(command, stdin_text=full_sql)
+                        results[key] = True
+                    except Exception as exc:
+                        results[key] = exc
+                        par_errors.append((key, exc))
+
+                for d in parallel_destinations:
+                    t = threading.Thread(
+                        target=_run_parallel_insert,
+                        args=(d, chunk_start, chunk_end,
+                              par_results, d["table_name"]),
+                    )
+                    par_threads.append(t)
+                    t.start()
+                for t in par_threads:
+                    t.join()
+
+            par_elapsed = time.perf_counter() - par_start
+            self._append_expansion_timing(
+                timing_report, "execute",
+                f"Parallel child inserts ({len(parallel_destinations)} dest × {len(chunks)} chunks)",
+                par_elapsed, "local_python_cpu",
+                details="Measured from Python; parallel SSH sessions.",
+            )
+            if par_errors:
+                raise RuntimeError(
+                    "Parallel insert failed: "
+                    + "; ".join(f"{k}: {e}" for k, e in par_errors)
+                )
+
+        rebuild_sql = []
+        if add_fk_sql:
+            rebuild_sql.append(add_fk_sql)
+        if rebuild_idx_sql:
+            rebuild_sql.append(rebuild_idx_sql)
+        if will_parallelize:
+            rebuild_sql.append(
+                f"DROP TABLE IF EXISTS {sql_ident('public')}.{sql_ident('_pgdm_src')};"
+            )
+            rebuild_sql.append(
+                f"DROP TABLE IF EXISTS {sql_ident('public')}.{sql_ident('_pgdm_positions')};"
+            )
+
+        if rebuild_sql:
+            with self.expansion_timing_scope(
+                timing_report, "execute",
+                "Rebuild FK constraints, unique indexes, and cleanup",
+            ):
+                self.run_remote_command(
+                    command,
+                    stdin_text="\n".join(rebuild_sql),
+                    cancel_event=cancel_event,
+                )
+
+        if post_commit_callback:
+            post_commit_callback()
+
+        with self.expansion_timing_scope(
+            timing_report, "execute",
+            "Parse manifest and timing telemetry",
+        ):
+            manifest = None
+            server_timing_items = []
+            for line in output.splitlines():
+                candidate = line.strip()
+                if not candidate.startswith("{"):
+                    continue
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                if "raw_hash_manifest" in parsed:
+                    manifest = parsed
+                if "pgdm_expansion_timings" in parsed:
+                    server_timing_items = list(
+                        parsed.get("pgdm_expansion_timings") or []
+                    )
+            for item in server_timing_items:
+                self._append_expansion_timing(
+                    timing_report,
+                    item.get("stage") or "execute",
+                    item.get("name") or "PostgreSQL expansion step",
+                    float(item.get("duration_seconds") or 0.0),
+                    "postgresql_backend_wall",
+                    rows=item.get("rows"),
+                    destination=item.get("destination"),
+                    details=(
+                        "Measured with PostgreSQL clock_timestamp(); "
+                        "SSH transport excluded."
+                    ),
+                )
+        if manifest is None:
+            raise RuntimeError(
+                "The optimized expansion completed but the manifest was not returned."
+            )
+
+        self._notify_progress(
+            progress_callback, "execute", 100,
+            "Data committed to the destinations.",
+        )
+
+        timing_report["source_rows"] = int(
+            manifest.get("expected_row_count") or 0
+        )
+        destination_row_totals = {}
+        for item in timing_report.get("items") or []:
+            dest = item.get("destination")
+            rows = item.get("rows")
+            if not dest or rows is None:
+                continue
+            destination_row_totals[dest] = (
+                destination_row_totals.get(dest, 0) + int(rows)
+            )
+        timing_report["destination_rows"] = [
+            {"table_name": d["table_name"], "rows": int(
+                destination_row_totals.get(d["table_name"], 0)
+            )}
+            for d in prepared["destinations"]
         ]
         timing_report["total_rows_inserted"] = sum(
             item["rows"] for item in timing_report["destination_rows"]

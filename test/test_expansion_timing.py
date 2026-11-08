@@ -124,6 +124,20 @@ class ExpansionTimingTests(unittest.TestCase):
             }
         ]
 
+        batched_preflight_result = {
+            "table_checks": [
+                {"tbl": "public.raw_data", "ok": True},
+                {"tbl": "public.table1", "ok": True},
+            ],
+            "columns": [
+                {"name": "raw_schema", "type": "text"},
+                {"name": "raw_hash", "type": "text"},
+            ],
+            "row_counts": [
+                {"schema": "public", "table": "table1", "count": 0},
+            ],
+        }
+
         with (
             patch.object(service, "table_exists", return_value=True),
             patch.object(
@@ -143,6 +157,8 @@ class ExpansionTimingTests(unittest.TestCase):
             patch.object(service, "ensure_data_database_metadata"),
             patch.object(service, "get_table_row_count", return_value=0),
             patch.object(service, "_validate_managed_sql_dependencies"),
+            patch.object(service, "_batched_expansion_preflight",
+                         return_value=batched_preflight_result),
             patch.object(service, "run_remote_command", side_effect=fake_remote_command),
         ):
             result = service.execute_cross_table_expansion(
