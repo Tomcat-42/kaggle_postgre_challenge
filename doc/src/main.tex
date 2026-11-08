@@ -137,7 +137,6 @@ Section~\ref{sec:conclusion} concludes.
 \label{sec:architecture}
 
 This section describes the baseline expansion pipeline, the data model it operates on, and the integrity guarantees that any optimized implementation must preserve.
-It then introduces a three-layer framework for reasoning about the optimization space.
 
 \subsection{Expansion Pipeline}
 \label{sec:pipeline}
@@ -206,7 +205,7 @@ The final table, \texttt{table2}, unpivots up to 14 positional entries per sourc
   \draw (t1)  -- (t2);
 
 \end{tikzpicture}
-\caption{Destination dependency graph. Arrows indicate that the target table's recipe reads from the source. Execution order: \texttt{table3}, \texttt{table4}, \texttt{table1}, \texttt{table5}, \texttt{table6}, \texttt{table2}.}
+\caption{Destination dependency graph. Arrows point from tables that are read by later recipes. Execution order: \texttt{table3}, \texttt{table4}, \texttt{table1}, \texttt{table5}, \texttt{table6}, \texttt{table2}.}
 \label{fig:dependencies}
 \end{figure}
 
@@ -228,26 +227,6 @@ The expansion pipeline enforces several guarantees that must be preserved regard
 
 An optimization may change \emph{how} these guarantees are enforced (for example, by validating constraints in bulk rather than per row) but may not remove them.
 
-\subsection{Optimization Framework}
-\label{sec:framework}
-
-We organize the optimization space into three layers, each addressing a different level of the system.
-This decomposition allows each layer's contribution to be measured independently and guides the order of implementation.
-
-\textbf{Layer~1: Query-level.}
-Optimizations at this layer change what the SQL statements do without altering the overall execution model.
-Examples include materializing extracted \texttt{jsonb} fields into a temporary table so that the source is scanned and parsed once rather than six times, deferring or disabling foreign-key constraints during bulk insertion, dropping and rebuilding indexes around the insert batch, and tuning PostgreSQL configuration parameters such as \texttt{work\_mem} and WAL settings.
-
-\textbf{Layer~2: Transaction-level.}
-This layer changes how work is batched and committed.
-Instead of a single monolithic transaction, the expansion can be split into chunks defined by \texttt{raw\_id} ranges, each committed independently.
-This directly enables checkpoint-and-resume: if the operation is interrupted, it restarts from the first uncommitted chunk rather than from scratch.
-The tradeoff is that inter-chunk consistency requires careful handling, since later recipes depend on rows inserted by earlier ones.
-
-\textbf{Layer~3: Architecture-level.}
-Optimizations at this layer change the execution model itself.
-Possibilities include opening multiple SSH channels to execute independent recipes in parallel, replacing \texttt{INSERT \ldots\ SELECT} with \texttt{COPY}-based bulk loading, moving transformation logic into a server-side PL/pgSQL procedure, or using unlogged tables for intermediate work to reduce WAL overhead.
-
 \section{Methodology and Results}
 \label{sec:methodology}
 
@@ -255,7 +234,20 @@ This section presents the profiling methodology, the optimizations applied at ea
 All experiments run on PostgreSQL~17 inside a container with 2\,GB \texttt{shared\_buffers}, 64\,MB \texttt{wal\_buffers}, and 4\,GB \texttt{max\_wal\_size}.
 The benchmark dataset contains $10^6$ source rows unless noted otherwise.
 Timing uses PostgreSQL's \texttt{clock\_timestamp()}, consistent with the application's \emph{measured processing total} metric.
-Standalone SQL benchmarks (without the application's PL/pgSQL row-count wrapper) are used for isolated optimization measurements; the final integrated result is reported with the full application framework.
+
+\subsection{Optimization Approach}
+\label{sec:framework}
+
+We organize the optimization space into three layers, each addressing a different level of the system.
+This decomposition allows each layer's contribution to be measured independently and guides the order of implementation.
+
+\textbf{Layer~1: Query-level} optimizations change what the SQL statements do without altering the overall execution model.
+Examples include materializing extracted \texttt{jsonb} fields into a temporary table, deferring foreign-key constraints during bulk insertion, and dropping and rebuilding indexes around the insert batch.
+
+\textbf{Layer~2: Transaction-level} optimizations change how work is batched and committed.
+The expansion can be split into chunks defined by \texttt{raw\_id} ranges, each committed independently, enabling checkpoint-and-resume.
+
+\textbf{Layer~3: Architecture-level} optimizations change the execution model itself, such as opening multiple SSH channels, replacing \texttt{INSERT \ldots\ SELECT} with \texttt{COPY}, or moving logic into a server-side PL/pgSQL procedure.
 
 \subsection{Baseline Profiling}
 \label{sec:profiling}
@@ -402,28 +394,25 @@ We evaluated several architecture-level changes.
 Increasing \texttt{shared\_buffers} from 128\,MB to 2\,GB, \texttt{wal\_buffers} from 4\,MB to 64\,MB, and \texttt{max\_wal\_size} from 1\,GB to 4\,GB reduced total time by 11\% at $10^6$ rows.
 
 We tested five additional architecture-level approaches, all of which proved slower than the single-batch temporary-table design.
+Table~\ref{tab:rejected} summarizes the results and failure mechanisms.
+In each case, the overhead was identified through measurement and is detailed in the timing reports.
 
-\textbf{WAL compression} (\texttt{wal\_compression\,=\,pglz}) added 9\% to total time.
-At $10^6$ rows the working set fits in \texttt{shared\_buffers}, so the I/O savings from smaller WAL records are minimal, while the per-record CPU cost of LZ compression is paid on every write.
-
-\textbf{Unlogged destination tables.}
-Setting destinations to \texttt{UNLOGGED} before inserts eliminates WAL during the insert phase.
-However, the subsequent \texttt{ALTER TABLE SET LOGGED} must rewrite the entire table contents into WAL, an operation equivalent to a full-table \texttt{COPY}.
-The net effect was 26\% slower than the baseline approach.
-
-\textbf{PL/pgSQL server-side procedure.}
-Wrapping the expansion in a single \texttt{DO} block was 40\% slower.
-PostgreSQL disables parallel query for SQL statements executed inside PL/pgSQL functions~\cite{postgresql17}, so the extraction phase loses its parallel sequential scan.
-
-\textbf{COPY-based loading.}
-\texttt{COPY FROM} is designed for loading data from external sources.
-When data already resides inside PostgreSQL (in temporary tables), using \texttt{COPY} requires materializing the query result into a file or pipe and then re-ingesting it, a double materialization that was 12\% slower than direct \texttt{INSERT\ldots SELECT}.
-
-\textbf{Parallel SSH sessions.}
-The dependency graph allows \texttt{table5}, \texttt{table6}, and \texttt{table2} to be inserted concurrently after \texttt{table1} completes each chunk.
-Running three parallel SSH sessions achieved $1.5\times$ speedup on the insert phase alone.
-However, parallel sessions cannot access temporary tables created by the main session, so the extraction must use non-temporary (WAL-logged) staging tables.
-The WAL overhead of creating and writing these shared tables (approximately 7\,s at $10^6$ rows) offset the concurrency benefit, making the total 18\% slower than the sequential approach with temporary tables.
+\begin{table}[!ht]
+\centering
+\caption{Architecture-level approaches tested and rejected.}
+\label{tab:rejected}
+\begin{tabular}{lrl}
+\toprule
+\textbf{Approach} & \textbf{Overhead} & \textbf{Mechanism} \\
+\midrule
+WAL compression     & $+9\%$  & CPU cost exceeds I/O savings \\
+UNLOGGED tables     & $+26\%$ & \texttt{SET LOGGED} rewrites full table \\
+PL/pgSQL procedure  & $+40\%$ & Disables parallel query \\
+COPY loading        & $+12\%$ & Double materialization \\
+Parallel SSH        & $+18\%$ & Non-temp tables add WAL \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{Scaling}
 \label{sec:scaling}
@@ -513,9 +502,10 @@ Foreign keys and unique constraints are validated in bulk after the insert phase
 The relational output matches the baseline row-for-row across all six destination tables.
 Source validation, version registration, and the SSH-mediated execution model remain unchanged.
 
-Two limitations are worth noting.
-The integrated application result ($4.25\times$) is lower than the standalone SQL benchmark ($5.0\times$) because the application wraps each \texttt{INSERT} in a PL/pgSQL \texttt{DO} block for row-count tracking, which adds overhead.
-The position pre-computation currently targets the specific unpivot pattern used by the challenge recipes; a more general approach would require SQL-level pattern detection.
+\subsection*{Limitations and Future Work}
+
+The position pre-computation currently targets the specific unpivot pattern used by the expansion recipes; a more general approach would require SQL-level pattern detection.
+The application's PL/pgSQL row-count wrapper adds overhead to each insert statement, reducing the effective speedup from the theoretical maximum.
 
 At $3 \times 10^8$ source rows, we project a baseline time of approximately 14.6 hours and an optimized time under 3 hours.
 Further improvements could come from replacing the \texttt{psql} transport with a direct PostgreSQL connection through an SSH tunnel, which would eliminate process-startup overhead for each SQL batch.
