@@ -1,0 +1,5 @@
+# Cluster benchmark runs (large, generated per-run)
+run_*/
+
+# Keep local development results
+!local/
