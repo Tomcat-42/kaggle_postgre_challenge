@@ -1,0 +1,122 @@
+[
+  {
+    "method": "baseline",
+    "rows": 100000,
+    "run": 1,
+    "measured_s": 17.307,
+    "wall_s": 17.824,
+    "inserted": 532416,
+    "config": "stock 128MB",
+    "fks": 6
+  },
+  {
+    "method": "baseline",
+    "rows": 100000,
+    "run": 2,
+    "measured_s": 15.433,
+    "wall_s": 15.95,
+    "inserted": 532416,
+    "config": "stock 128MB",
+    "fks": 6
+  },
+  {
+    "method": "baseline",
+    "rows": 100000,
+    "run": 3,
+    "measured_s": 17.499,
+    "wall_s": 18.002,
+    "inserted": 532416,
+    "config": "stock 128MB",
+    "fks": 6
+  },
+  {
+    "method": "optimized",
+    "rows": 100000,
+    "run": 1,
+    "measured_s": 4.055,
+    "wall_s": 5.184,
+    "inserted": 532416,
+    "config": "tuned 2GB",
+    "fks": 6
+  },
+  {
+    "method": "optimized",
+    "rows": 100000,
+    "run": 2,
+    "measured_s": 4.242,
+    "wall_s": 5.382,
+    "inserted": 532416,
+    "config": "tuned 2GB",
+    "fks": 6
+  },
+  {
+    "method": "optimized",
+    "rows": 100000,
+    "run": 3,
+    "measured_s": 4.588,
+    "wall_s": 5.783,
+    "inserted": 532416,
+    "config": "tuned 2GB",
+    "fks": 6
+  },
+  {
+    "method": "baseline",
+    "rows": 1000000,
+    "run": 1,
+    "measured_s": 169.227,
+    "wall_s": 169.702,
+    "inserted": 5321553,
+    "config": "stock 128MB",
+    "fks": 6
+  },
+  {
+    "method": "baseline",
+    "rows": 1000000,
+    "run": 2,
+    "measured_s": 165.875,
+    "wall_s": 166.366,
+    "inserted": 5321553,
+    "config": "stock 128MB",
+    "fks": 6
+  },
+  {
+    "method": "baseline",
+    "rows": 1000000,
+    "run": 3,
+    "measured_s": 156.287,
+    "wall_s": 156.782,
+    "inserted": 5321553,
+    "config": "stock 128MB",
+    "fks": 6
+  },
+  {
+    "method": "optimized",
+    "rows": 1000000,
+    "run": 1,
+    "measured_s": 35.629,
+    "wall_s": 41.662,
+    "inserted": 5321553,
+    "config": "tuned 2GB",
+    "fks": 6
+  },
+  {
+    "method": "optimized",
+    "rows": 1000000,
+    "run": 2,
+    "measured_s": 33.386,
+    "wall_s": 40.156,
+    "inserted": 5321553,
+    "config": "tuned 2GB",
+    "fks": 6
+  },
+  {
+    "method": "optimized",
+    "rows": 1000000,
+    "run": 3,
+    "measured_s": 33.373,
+    "wall_s": 39.154,
+    "inserted": 5321553,
+    "config": "tuned 2GB",
+    "fks": 6
+  }
+]
