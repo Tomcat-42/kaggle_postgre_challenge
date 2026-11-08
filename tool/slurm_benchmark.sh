@@ -3,7 +3,7 @@
 #SBATCH --partition=lunaris
 #SBATCH --nodes=1
 #SBATCH --exclusive
-#SBATCH --time=08:00:00
+#SBATCH --time=14:00:00
 #SBATCH --output=benchmark_%j.out
 #SBATCH --error=benchmark_%j.err
 
@@ -35,7 +35,7 @@ if [[ "${1:-}" == "--quick" ]]; then
     RUNS=1; SCALES=(10000); METHODS=(baseline optimized)
     log_prefix="[QUICK] "
 else
-    RUNS=3; SCALES=(10000 50000 100000 250000 500000 1000000)
+    RUNS=3; SCALES=(10000 50000 100000 250000 500000 1000000 5000000 10000000)
     METHODS=(baseline optimized); log_prefix=""
 fi
 
