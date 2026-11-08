@@ -1,0 +1,24 @@
+{
+  "chunk_comparison": [
+    {
+      "name": "MONOLITHIC (1M)",
+      "wall": 56.926511483994545,
+      "ram_mb": 256.9
+    },
+    {
+      "name": "SMART CHUNKED 50K (20 chunks, 1M)",
+      "wall": 58.49934794398723,
+      "ram_mb": 258.5
+    },
+    {
+      "name": "SMART CHUNKED 100K (10 chunks, 1M)",
+      "wall": 52.287453793993336,
+      "ram_mb": 265.9
+    },
+    {
+      "name": "SMART CHUNKED 250K (4 chunks, 1M)",
+      "wall": 48.41035829899192,
+      "ram_mb": 254.7
+    }
+  ]
+}

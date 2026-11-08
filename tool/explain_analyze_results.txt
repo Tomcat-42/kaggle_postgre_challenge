@@ -1,0 +1,203 @@
+EXPLAIN (ANALYZE, BUFFERS, TIMING) — 100,000 source rows
+================================================================
+
+=== 01_table3.sql -> public.table3 (4 rows inserted) ===
+
+Insert on table3  (actual time=187.987..187.988 rows=0)
+  Buffers: shared hit=8194 read=16873 dirtied=4 written=2
+  -> Subquery Scan on "*SELECT*"  (actual time=187.760..187.797 rows=4)
+       -> HashAggregate  (actual time=187.606..187.640 rows=4)
+             Group Key: btrim(text_column_1), left(upper(btrim(text_column_2)),1), right(upper(btrim(text_column_2)),1)
+             Batches: 1  Memory Usage: 409kB
+             Buffers: shared hit=8164 read=16868
+             -> Seq Scan on raw_data  (actual time=0.060..172.962 rows=100000)
+                   Filter: raw_schema='group001' AND btrim(text_column_1)<>'' AND upper(btrim(text_column_2)) ~ '^[A-Z]{2}$'
+                   Buffers: shared hit=8164 read=16868
+
+Planning Time: 1.157 ms
+Execution Time: 188.337 ms
+  - Seq Scan on raw_data: 172.96 ms (91.8%)
+  - HashAggregate dedup: 14.64 ms
+  - Insert (4 rows): 0.19 ms
+  - FK triggers: NONE
+
+=== 02_table4.sql -> public.table4 (26 rows inserted) ===
+
+Insert on table4  (actual time=162.363..162.364 rows=0)
+  Buffers: shared hit=8266 read=16837 dirtied=3 written=2
+  -> Subquery Scan on "*SELECT*"  (actual time=162.066..162.102 rows=26)
+       -> HashAggregate  (actual time=162.065..162.098 rows=26)
+             Batches: 1  Memory Usage: 409kB
+             Buffers: shared hit=8196 read=16836
+             -> Seq Scan on raw_data  (actual time=0.034..152.676 rows=100000)
+                   Filter: raw_schema='group001' AND upper(btrim(text_column_3)) ~ '^[A-Z]{2}$'
+                   Buffers: shared hit=8196 read=16836
+
+Planning Time: 0.502 ms
+Execution Time: 162.560 ms
+  - Seq Scan on raw_data: 152.68 ms (93.9%)
+  - HashAggregate dedup: 9.39 ms
+  - Insert (26 rows): 0.30 ms
+  - FK triggers: NONE
+
+=== 03_table1.sql -> public.table1 (100,000 rows inserted) ===
+
+Insert on table1  (actual time=1741.811..1741.814 rows=0)
+  Buffers: shared hit=610267 read=16807 dirtied=1691 written=1690
+  -> Hash Join  (actual time=0.236..1502.572 rows=100000)
+       Hash Cond: btrim(text_column_1)=dimension_row.text_column_1 AND left(...)=text_column_3 AND right(...)=text_column_4
+       -> Seq Scan on raw_data  (actual time=0.023..46.985 rows=100000)
+             Filter: raw_schema='group001'
+             Buffers: shared hit=8228 read=16804
+       -> Hash  (actual time=0.013..0.014 rows=4)   [table3 dimension lookup]
+             Buffers: shared hit=1
+
+Planning Time: 1.213 ms
+Trigger for constraint table1_id_column_3_fkey: time=1208.539 calls=100000
+Trigger for constraint table1_id_column_4_fkey: time=851.789 calls=100000
+Execution Time: 3810.769 ms
+
+BREAKDOWN:
+  - Seq Scan on raw_data: 46.99 ms (1.2%)
+  - JSONB field extraction + casting + Hash Join: ~1455 ms (38.2%)
+  - Insert I/O (buffers written=1690): 239 ms (6.3%)
+  - FK trigger id_column_3 (raw_data.raw_id): 1208.54 ms (31.7%)
+  - FK trigger id_column_4 (table3.id_column_1): 851.79 ms (22.4%)
+  - FK TRIGGERS TOTAL: 2060.33 ms (54.1%)
+
+=== 04_table5.sql -> public.table5 (100,000 rows inserted) ===
+
+Insert on table5  (actual time=351.373..351.375 rows=0)
+  Buffers: shared hit=616024 read=11198 dirtied=2023 written=1190
+  -> Hash Join  (actual time=16.028..163.118 rows=100000)
+       Hash Cond: raw_data.raw_id = main_row.id_column_3
+       -> Seq Scan on raw_data  (actual time=0.015..74.018 rows=100000)
+             Filter: raw_schema='group001' AND NULLIF(btrim(integer_column_1),''::text)::numeric > 0
+             Buffers: shared hit=14104 read=10928
+       -> Hash (table1 lookup)  (actual time=15.740..15.740 rows=100000)
+             Memory Usage: 5712kB
+             Buffers: shared hit=874 read=263
+
+Planning Time: 1.094 ms
+Trigger for constraint table5_id_column_2_fkey: time=851.383 calls=100000
+Execution Time: 1207.326 ms
+
+BREAKDOWN:
+  - Seq Scan on raw_data: 74.02 ms (6.1%)
+  - Hash Join + JSONB extraction: 89.10 ms (7.4%)
+  - Insert I/O: 188.26 ms (15.6%)
+  - FK trigger id_column_2 (table1.id_column_1): 851.38 ms (70.5%)
+  - FK TRIGGERS TOTAL: 851.38 ms (70.5%)
+
+=== 05_table6.sql -> public.table6 (100,000 rows inserted) ===
+
+Insert on table6  (actual time=339.261..339.263 rows=0)
+  Buffers: shared hit=615024 read=12416 dirtied=1300 written=1300
+  -> Hash Join  (actual time=19.529..160.409 rows=100000)
+       Hash Cond: upper(btrim(text_column_3)) = reference_row.text_column_2 (double hash join)
+       -> Hash Join (raw_data x table1): (actual time=19.397..71.387 rows=100000)
+             Hash Cond: raw_data.raw_id = main_row.id_column_3
+       -> Hash (table4 lookup): rows=26
+
+Planning Time: 1.287 ms
+Trigger for constraint table6_id_column_2_fkey: time=836.985 calls=100000
+Trigger for constraint table6_id_column_3_fkey: time=357.121 calls=100000
+Execution Time: 1540.952 ms
+
+BREAKDOWN:
+  - Seq Scan on raw_data: 30.29 ms (2.0%)
+  - Double Hash Join + JSONB: 130.12 ms (8.4%)
+  - Insert I/O: 178.85 ms (11.6%)
+  - FK trigger id_column_2 (table1.id_column_1): 836.99 ms (54.3%)
+  - FK trigger id_column_3 (table4.id_column_1): 357.12 ms (23.2%)
+  - FK TRIGGERS TOTAL: 1194.11 ms (77.5%)
+
+=== 06_table2.sql -> public.table2 (232,386 rows inserted) ===
+
+Insert on table2  (actual time=3822.865..3822.869 rows=0)
+  Buffers: shared hit=1203952 read=15766 dirtied=3474 written=4438
+  -> Nested Loop  (actual time=14.974..3368.039 rows=232386)
+       -> Hash Join (raw_data x table1): (actual time=14.842..100.206 rows=100000)
+             Hash Cond: raw_data.raw_id = main_row.id_column_3
+       -> Values Scan (CROSS JOIN LATERAL, 14 positions): rows=2.3/row avg
+             Filter: upper(btrim(type)) IN ('X','Y','Z') AND weight::numeric >= 0 AND declared_number = position_number
+             Rows Removed by Filter: 12 per source row
+
+Planning Time: 1.641 ms
+Trigger for constraint table2_id_column_2_fkey: time=1856.995 calls=232386
+Execution Time: 5689.013 ms
+
+BREAKDOWN:
+  - Seq Scan on raw_data: 43.70 ms (0.8%)
+  - Hash Join (raw_data x table1): 56.50 ms (1.0%)
+  - CROSS JOIN LATERAL (Values Scan, 14 positions x 100K rows): 3268.04 ms (57.4%)
+      -> Filter evaluates ~1.4M candidates, keeps 232K
+  - Insert I/O: 454.83 ms (8.0%)
+  - FK trigger id_column_2 (table1.id_column_1): 1857.00 ms (32.6%)
+  - FK TRIGGERS TOTAL: 1857.00 ms (32.6%)
+
+
+================================================================
+SUMMARY TABLE
+================================================================
+
+Recipe          | Rows     | Exec Time  | Scan Time | Join/Xform | Insert I/O | FK Triggers | FK %
+----------------|----------|------------|-----------|------------|------------|-------------|------
+01_table3       |        4 |    188 ms  |   173 ms  |     15 ms  |     ~0 ms  |       0 ms  |  0.0%
+02_table4       |       26 |    163 ms  |   153 ms  |      9 ms  |     ~0 ms  |       0 ms  |  0.0%
+03_table1       |  100,000 |  3,811 ms  |    47 ms  |  1,455 ms  |    239 ms  |   2,060 ms  | 54.1%
+04_table5       |  100,000 |  1,207 ms  |    74 ms  |     89 ms  |    188 ms  |     851 ms  | 70.5%
+05_table6       |  100,000 |  1,541 ms  |    30 ms  |    130 ms  |    179 ms  |   1,194 ms  | 77.5%
+06_table2       |  232,386 |  5,689 ms  |    44 ms  |  3,324 ms  |    455 ms  |   1,857 ms  | 32.6%
+----------------|----------|------------|-----------|------------|------------|-------------|------
+TOTAL           |  532,416 | 12,599 ms  |   521 ms  |  5,022 ms  |  1,061 ms  |   5,962 ms  | 47.3%
+
+
+================================================================
+KEY OBSERVATIONS
+================================================================
+
+1. FOREIGN KEY TRIGGERS ARE THE DOMINANT COST
+   FK constraint validation accounts for 5,962 ms out of 12,599 ms total (47.3%).
+   Every INSERT fires per-row FK triggers that look up the referenced table.
+   At 100K rows, table1 alone spends 2,060 ms on FK checks (54.1% of its time).
+   table6 is worst: 77.5% of its execution is FK triggers.
+
+2. JSONB FIELD EXTRACTION IS THE SECOND LARGEST COST
+   The CROSS JOIN LATERAL in recipe 06 (table2) expands 100K rows into 1.4M
+   candidates by unpivoting 14 positions, then filters down to 232K. This
+   JSONB extraction + Values Scan + filter costs 3,268 ms (57.4% of table2).
+   Recipe 03 (table1) extracts ~15 JSONB fields per row at a cost of ~1,455 ms.
+
+3. SEQUENTIAL SCANS ON raw_data ARE REPEATED 6 TIMES
+   Every recipe does a full Seq Scan on raw_data (25,032 pages).
+   With buffer caching, the I/O cost is only ~521 ms total across all 6 scans,
+   but the JSONB parsing cost is paid fresh each time.
+
+4. NO INDEX USAGE ON raw_data
+   The index on (raw_schema, raw_id) is never used. The planner correctly
+   chooses Seq Scan since raw_schema='group001' matches all 100K rows.
+   At larger scales this remains optimal for full-table expansion.
+
+5. BUFFER ACTIVITY
+   Total buffers across all recipes:
+     shared hit:  3,061,727
+     shared read:    89,897
+     dirtied:         8,495
+     written:         8,620
+   The large hit count (esp. recipes 04-06) comes from FK trigger lookups
+   repeatedly probing the same index pages on table1.
+
+6. PLANNER ESTIMATES ARE POOR
+   PostgreSQL consistently underestimates row counts. For example, table1
+   estimates 46,617 rows but gets 100,000. This is because the planner
+   doesn't know the jsonb content distribution. This affects join strategy
+   choices and hash table sizing (note "Buckets: 131072 originally 65536"
+   resizing in several recipes).
+
+7. RECIPE ORDERING IMPACT
+   table3 and table4 (dimension tables) are cheap (~350 ms combined).
+   table1 is the most expensive single recipe (3,811 ms) due to 15+ JSONB
+   field extractions plus two FK triggers.
+   table2 is the most expensive overall (5,689 ms) due to the 14-position
+   CROSS JOIN LATERAL unpivot generating 232K rows with FK validation.

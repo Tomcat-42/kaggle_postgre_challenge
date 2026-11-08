@@ -1,0 +1,74 @@
+[
+  {
+    "variant": "baseline",
+    "rows": 10000,
+    "pg_time": 1.7821,
+    "wall_time": 1.8433355469896924
+  },
+  {
+    "variant": "optimized",
+    "rows": 10000,
+    "pg_time": 0.6893,
+    "wall_time": 0.7522879430034664
+  },
+  {
+    "variant": "baseline",
+    "rows": 50000,
+    "pg_time": 8.44,
+    "wall_time": 8.498022849991685
+  },
+  {
+    "variant": "optimized",
+    "rows": 50000,
+    "pg_time": 2.7102,
+    "wall_time": 2.7737101490056375
+  },
+  {
+    "variant": "baseline",
+    "rows": 100000,
+    "pg_time": 16.4714,
+    "wall_time": 16.52994296500401
+  },
+  {
+    "variant": "optimized",
+    "rows": 100000,
+    "pg_time": 4.1035,
+    "wall_time": 4.163496004999615
+  },
+  {
+    "variant": "baseline",
+    "rows": 250000,
+    "pg_time": 44.0554,
+    "wall_time": 44.11644144599268
+  },
+  {
+    "variant": "optimized",
+    "rows": 250000,
+    "pg_time": 9.4375,
+    "wall_time": 9.49997346199234
+  },
+  {
+    "variant": "baseline",
+    "rows": 500000,
+    "pg_time": 83.7964,
+    "wall_time": 83.81574438499229
+  },
+  {
+    "variant": "optimized",
+    "rows": 500000,
+    "pg_time": 17.2879,
+    "wall_time": 17.349621753994143
+  },
+  {
+    "variant": "baseline",
+    "rows": 1000000,
+    "pg_time": 174.8772,
+    "wall_time": 174.9009213429963
+  },
+  {
+    "variant": "optimized",
+    "rows": 1000000,
+    "pg_time": 35.1726,
+    "wall_time": 35.19479884998873
+  }
+]
