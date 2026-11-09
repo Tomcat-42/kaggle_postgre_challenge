@@ -14251,7 +14251,7 @@ FROM pg_temp.pgdm_expansion_timings;
         }
 
     @staticmethod
-    def _build_discover_constraints_sql(destinations) -> str:
+    def _build_discover_constraints_sql(destinations, source_ref=None, raw_schemas=None) -> str:
         values_parts = []
         for d in destinations:
             s = str(d.get("schema_name") or "").strip()
@@ -14261,6 +14261,11 @@ FROM pg_temp.pgdm_expansion_timings;
         if not values_parts:
             return "SELECT '{}'::text;"
         values_sql = ", ".join(values_parts)
+        if source_ref and raw_schemas:
+            scope = ", ".join(sql_literal(v) for v in raw_schemas)
+            range_from = f"{source_ref} WHERE raw_schema IN ({scope})"
+        else:
+            range_from = "pg_temp._pgdm_src"
         return f"""
 SELECT json_build_object(
     'fk_constraints', COALESCE((
@@ -14312,13 +14317,30 @@ SELECT json_build_object(
         WHERE idx.indisunique AND NOT idx.indisprimary
           AND (ns.nspname, cls.relname) IN (VALUES {values_sql})
     ), '[]'::json),
+    'pk_constraints', COALESCE((
+        SELECT json_agg(json_build_object(
+            'schema_name', ns.nspname,
+            'table_name', cls.relname,
+            'constraint_name', con.conname,
+            'drop_ddl', 'ALTER TABLE ' || quote_ident(ns.nspname) || '.' || quote_ident(cls.relname)
+                || ' DROP CONSTRAINT IF EXISTS ' || quote_ident(con.conname),
+            'add_ddl', 'ALTER TABLE ' || quote_ident(ns.nspname) || '.' || quote_ident(cls.relname)
+                || ' ADD CONSTRAINT ' || quote_ident(con.conname) || ' '
+                || pg_get_constraintdef(con.oid)
+        ) ORDER BY ns.nspname, cls.relname, con.conname)
+        FROM pg_constraint con
+        JOIN pg_class cls ON cls.oid = con.conrelid
+        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+        WHERE con.contype = 'p'
+          AND (ns.nspname, cls.relname) IN (VALUES {values_sql})
+    ), '[]'::json),
     'raw_id_range', (
         SELECT json_build_object(
             'min_id', min(raw_id),
             'max_id', max(raw_id),
             'total_rows', count(*)
         )
-        FROM pg_temp._pgdm_src
+        FROM {range_from}
     )
 )::text;
 """.strip()
@@ -14385,7 +14407,7 @@ SELECT json_build_object(
         progress_callback=None,
         post_commit_callback=None,
         timing_report: dict | None = None,
-        chunk_size: int = 250_000,
+        chunk_size: int = 1_000_000,
     ) -> dict:
         if timing_report is None:
             timing_report = self.create_cross_table_expansion_timing_report(
@@ -14481,18 +14503,13 @@ SELECT json_build_object(
             timing_report, "prepare",
             "Discover constraints and compute chunk boundaries",
         ):
+            source_ref = f"{sql_ident(source_schema_name)}.{sql_ident(source_table_name)}"
             discover_sql = self._build_discover_constraints_sql(
-                prepared["destinations"]
+                prepared["destinations"],
+                source_ref=source_ref,
+                raw_schemas=prepared["raw_schemas"],
             )
-            preflight_sql = (
-                f"CREATE TEMP TABLE _pgdm_src ON COMMIT PRESERVE ROWS AS "
-                f"SELECT * FROM {sql_ident(source_schema_name)}.{sql_ident(source_table_name)} "
-                f"WHERE {sql_ident('raw_schema')} IN ("
-                + ", ".join(sql_literal(v) for v in prepared["raw_schemas"])
-                + ");\n"
-                + discover_sql
-                + "\nDROP TABLE _pgdm_src;"
-            )
+            preflight_sql = discover_sql
             command = (
                 f"psql -h localhost -U {shlex.quote(self.sql_username)} "
                 f"-d {shlex.quote(database_name)} "
@@ -14528,10 +14545,13 @@ SELECT json_build_object(
 
         fk_list = constraint_data.get("fk_constraints") or []
         idx_list = constraint_data.get("unique_indexes") or []
+        pk_list = constraint_data.get("pk_constraints") or []
         drop_fk_sql = "\n".join(f"{i['drop_ddl']};" for i in fk_list)
         add_fk_sql = "\n".join(f"{i['add_ddl']};" for i in fk_list)
         drop_idx_sql = "\n".join(f"{i['drop_ddl']};" for i in idx_list)
         rebuild_idx_sql = "\n".join(f"{i['add_ddl']};" for i in idx_list)
+        drop_pk_sql = "\n".join(f"{i['drop_ddl']};" for i in pk_list)
+        add_pk_sql = "\n".join(f"{i['add_ddl']};" for i in pk_list)
 
         with self.expansion_timing_scope(
             timing_report, "prepare", "Build optimized SQL batch",
@@ -14745,20 +14765,48 @@ CREATE TEMP TABLE pgdm_expansion_timings (
 
             sql_parts.append(
                 "INSERT INTO pg_temp.pgdm_expansion_timings VALUES "
-                "(2, 'execute', 'Index, analyze, and pre-compute positions', "
+                "(2, 'execute', 'Index source temp table', "
                 "clock_timestamp(), NULL, NULL, NULL, NULL);"
             )
             sql_parts.append(f"CREATE INDEX ON {src_ref} (raw_id);")
+            sql_parts.append(
+                "UPDATE pg_temp.pgdm_expansion_timings SET finished_at = "
+                "clock_timestamp() WHERE sequence_number = 2;"
+            )
             if can_precompute_positions:
+                sql_parts.append(
+                    "INSERT INTO pg_temp.pgdm_expansion_timings VALUES "
+                    "(-2, 'execute', 'Pre-compute positions (CTAS)', "
+                    "clock_timestamp(), NULL, NULL, NULL, NULL);"
+                )
                 sql_parts.append(positions_sql)
+                sql_parts.append(
+                    "UPDATE pg_temp.pgdm_expansion_timings SET finished_at = "
+                    "clock_timestamp() WHERE sequence_number = -2;"
+                )
+                sql_parts.append(
+                    "INSERT INTO pg_temp.pgdm_expansion_timings VALUES "
+                    "(-3, 'execute', 'Index positions temp table', "
+                    "clock_timestamp(), NULL, NULL, NULL, NULL);"
+                )
                 sql_parts.append(f"CREATE INDEX ON {pos_ref} (raw_id);")
+                sql_parts.append(
+                    "UPDATE pg_temp.pgdm_expansion_timings SET finished_at = "
+                    "clock_timestamp() WHERE sequence_number = -3;"
+                )
+            sql_parts.append(
+                "INSERT INTO pg_temp.pgdm_expansion_timings VALUES "
+                "(-4, 'execute', 'ANALYZE temp tables', "
+                "clock_timestamp(), NULL, NULL, NULL, NULL);"
+            )
+            if can_precompute_positions:
                 sql_parts.append(f"ANALYZE {src_ref};")
                 sql_parts.append(f"ANALYZE {pos_ref};")
             else:
                 sql_parts.append(f"ANALYZE {src_ref};")
             sql_parts.append(
                 "UPDATE pg_temp.pgdm_expansion_timings SET finished_at = "
-                "clock_timestamp() WHERE sequence_number = 2;"
+                "clock_timestamp() WHERE sequence_number = -4;"
             )
 
             sql_parts.append(
@@ -14776,11 +14824,13 @@ CREATE TEMP TABLE pgdm_expansion_timings (
 
             sql_parts.append(
                 "INSERT INTO pg_temp.pgdm_expansion_timings VALUES "
-                "(4, 'execute', 'Drop FK constraints and unique indexes', "
+                "(4, 'execute', 'Drop constraints and indexes', "
                 "clock_timestamp(), NULL, NULL, NULL, NULL);"
             )
             if drop_fk_sql:
                 sql_parts.append(drop_fk_sql)
+            if drop_pk_sql:
+                sql_parts.append(drop_pk_sql)
             if drop_idx_sql:
                 sql_parts.append(drop_idx_sql)
             sql_parts.append(
@@ -15019,29 +15069,67 @@ FROM pg_temp.pgdm_expansion_timings WHERE finished_at IS NOT NULL;""".strip())
                     + "; ".join(f"{k}: {e}" for k, e in par_errors)
                 )
 
-        rebuild_sql = []
-        if add_fk_sql:
-            rebuild_sql.append(add_fk_sql)
-        if rebuild_idx_sql:
-            rebuild_sql.append(rebuild_idx_sql)
+        cleanup_sql = []
         if will_parallelize:
-            rebuild_sql.append(
+            cleanup_sql.append(
                 f"DROP TABLE IF EXISTS {sql_ident('public')}.{sql_ident('_pgdm_src')};"
             )
-            rebuild_sql.append(
+            cleanup_sql.append(
                 f"DROP TABLE IF EXISTS {sql_ident('public')}.{sql_ident('_pgdm_positions')};"
             )
 
-        if rebuild_sql:
+        if pk_list or idx_list:
             with self.expansion_timing_scope(
-                timing_report, "execute",
-                "Rebuild FK constraints, unique indexes, and cleanup",
+                timing_report, "execute", "Rebuild PK and unique indexes (parallel)",
+            ):
+                rebuild_stmts = []
+                for pk in pk_list:
+                    rebuild_stmts.append(f"{pk['add_ddl']};")
+                for idx in idx_list:
+                    rebuild_stmts.append(f"{idx['add_ddl']};")
+                if len(rebuild_stmts) > 1:
+                    import threading as _thr
+                    max_par = 4
+                    sem = _thr.Semaphore(max_par)
+                    errors = []
+                    def _rebuild_one(stmt, errs):
+                        with sem:
+                            try:
+                                self.run_remote_command(
+                                    command, stdin_text=stmt,
+                                    cancel_event=cancel_event,
+                                )
+                            except Exception as e:
+                                errs.append((stmt[:60], e))
+                    threads = []
+                    for stmt in rebuild_stmts:
+                        t = _thr.Thread(target=_rebuild_one, args=(stmt, errors))
+                        threads.append(t)
+                        t.start()
+                    for t in threads:
+                        t.join()
+                    if errors:
+                        raise RuntimeError(
+                            "Parallel rebuild failed: "
+                            + "; ".join(f"{s}: {e}" for s, e in errors)
+                        )
+                elif rebuild_stmts:
+                    self.run_remote_command(
+                        command, stdin_text=rebuild_stmts[0],
+                        cancel_event=cancel_event,
+                    )
+        if add_fk_sql:
+            with self.expansion_timing_scope(
+                timing_report, "execute", "Rebuild FK constraints",
             ):
                 self.run_remote_command(
-                    command,
-                    stdin_text="\n".join(rebuild_sql),
-                    cancel_event=cancel_event,
+                    command, stdin_text=add_fk_sql, cancel_event=cancel_event,
                 )
+        if cleanup_sql:
+            self.run_remote_command(
+                command, stdin_text="\n".join(cleanup_sql),
+                cancel_event=cancel_event,
+            )
 
         if post_commit_callback:
             post_commit_callback()

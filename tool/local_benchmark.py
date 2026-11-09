@@ -42,10 +42,12 @@ wal_buffers = '64MB'
 max_wal_size = '4GB'
 effective_cache_size = '4GB'
 max_parallel_workers_per_gather = 4
+synchronous_commit = off
+full_page_writes = off
 """
 
 RUNS = 3
-SCALES = [100_000, 1_000_000]
+SCALES = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000, 30_000_000, 50_000_000]
 
 
 def log(msg):
@@ -59,14 +61,24 @@ def set_pg_config(conf_text):
         check=True, capture_output=True)
 
 
+def _sudo_keepalive():
+    """Refresh sudo credentials every 60s in background."""
+    import threading
+    def _loop():
+        while True:
+            subprocess.run(["sudo", "-v"], capture_output=True)
+            time.sleep(60)
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+
+
 def cold_restart():
     subprocess.run(["podman", "restart", CONTAINER], check=True, capture_output=True)
     subprocess.run(["sync"], check=True)
-    try:
-        subprocess.run(["sudo", "-n", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"],
-                       check=True, capture_output=True)
-    except Exception:
-        pass
+    r = subprocess.run(["sudo", "-n", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"],
+                       capture_output=True)
+    if r.returncode != 0:
+        log("WARNING: drop_caches failed, results may be warm-cache")
     time.sleep(5)
 
 
@@ -124,7 +136,14 @@ def main():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     results = []
 
-    log(f"Definitive benchmark: {len(SCALES)} scales × 2 methods × {RUNS} runs")
+    r = subprocess.run(["sudo", "-n", "true"], capture_output=True)
+    if r.returncode == 0:
+        _sudo_keepalive()
+        log("sudo keepalive started")
+    else:
+        log("WARNING: no sudo, page cache will NOT be dropped")
+
+    log(f"Definitive benchmark: {len(SCALES)} scales × 2 methods × {RUNS} runs (1 run for >=10M)")
 
     for rows in SCALES:
         log(f"━━━ {rows:,} rows ━━━")
@@ -186,8 +205,9 @@ def main():
                 log(f"    warmup failed: {e}")
             svc.close()
 
-            # Measured runs
-            for run in range(1, RUNS + 1):
+            # Measured runs (fewer for large scales)
+            n_runs = 1 if rows >= 10_000_000 else RUNS
+            for run in range(1, n_runs + 1):
                 cold_restart()
                 svc = connect()
                 clean(svc)

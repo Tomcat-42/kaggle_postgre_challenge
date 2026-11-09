@@ -1,7 +1,7 @@
 # PostgreSQL Data Pipeline Optimization
 
 Optimized expansion pipeline for [PostgreSQL Data Manager](https://github.com/igorsiecz/kaggle_postgre_challenge).
-Reduces the measured processing time of the JSONB-to-relational expansion by up to 5× through query redesign, transaction chunking, and server tuning.
+Reduces the measured processing time of the JSONB-to-relational expansion by 5.1x through query redesign, constraint management, transaction chunking, and server tuning. Speedup holds from 10^6 through 10^7 source rows.
 
 Paper: [`doc/build/main.pdf`](doc/build/main.pdf)
 
@@ -42,9 +42,9 @@ Open `kaggle_challenge` → `raw_data` → Expand.
 .venv/bin/python tool/local_benchmark.py
 ```
 
-Runs baseline (stock config) and optimized (tuned config) at 100K and 1M rows.
+Runs baseline (stock config) and optimized (tuned config) from 10K to 50M rows.
 Drops OS page cache and restarts PostgreSQL between runs.
-Reports median of 3 measured runs after 1 warmup.
+Reports median of 3 measured runs after 1 warmup (1 run for scales above 10M).
 
 Results are saved to `results/local/definitive_benchmark.json`.
 

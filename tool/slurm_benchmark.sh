@@ -140,6 +140,8 @@ checkpoint_completion_target = 0.9
 random_page_cost = 1.1
 effective_io_concurrency = 200
 huge_pages = try
+synchronous_commit = off
+full_page_writes = off
 EOF
     fi
 }

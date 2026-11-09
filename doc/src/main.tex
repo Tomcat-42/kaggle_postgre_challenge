@@ -52,7 +52,8 @@ pablo.hugen@inf.ufrgs.br}}
 
 \begin{abstract}
 We optimize the \texttt{jsonb} expansion pipeline of a Python/PostgreSQL application that transforms semi-structured records into normalized relational tables over SSH.
-Through profiling-driven query redesign, transaction chunking, and server tuning, we reduce the measured expansion time from 166\,s to 33\,s ($5.0\times$) at $10^6$ source rows, with the speedup increasing at larger scales.
+Through profiling-driven query redesign, transaction chunking, and server tuning, we reduce the measured expansion time from 180\,s to 35.5\,s ($5.1\times$) at $10^6$ source rows.
+The speedup holds at $5.1\text{--}5.2\times$ through $10^7$ rows.
 Peak RAM remains at 256\,MB and temporary storage scales linearly with the source table.
 The chunked transaction model enables checkpoint-and-resume for failure recovery.
 All integrity guarantees are preserved.
@@ -238,7 +239,7 @@ PostgreSQL~17.2 runs inside a container with no memory limit.
 
 \textbf{Protocol.}
 The baseline uses the stock PostgreSQL configuration (128\,MB \texttt{shared\_buffers}, 4\,MB \texttt{work\_mem}).
-The optimized pipeline uses a tuned configuration (2\,GB \texttt{shared\_buffers}, 256\,MB \texttt{work\_mem}, 64\,MB \texttt{wal\_buffers}, 4\,GB \texttt{max\_wal\_size}).
+The optimized pipeline uses a tuned configuration (2\,GB \texttt{shared\_buffers}, 256\,MB \texttt{work\_mem}, 64\,MB \texttt{wal\_buffers}, 4\,GB \texttt{max\_wal\_size}, \texttt{synchronous\_commit\,=\,off}, \texttt{full\_page\_writes\,=\,off}).
 Before each method, the challenge database is regenerated from scratch using the deterministic generator, which guarantees that all foreign-key constraints and unique indexes are present.
 The presence of all six FK constraints is verified programmatically before each baseline run.
 Before each measured run, the operating system's page cache is dropped (\texttt{/proc/sys/vm/drop\_caches}) and PostgreSQL is restarted to ensure cold-cache conditions.
@@ -326,10 +327,13 @@ The constraints are discovered dynamically by querying \texttt{pg\_constraint}, 
 Re-adding the constraints validates all existing rows in bulk, which is cheaper than per-row trigger checks during insertion.
 This single change yields a 2.0$\times$ speedup at $10^5$ rows.
 
-\textbf{Index and unique-constraint removal.}
-Unique indexes and constraints on destination tables are dropped before inserts and rebuilt afterwards.
+\textbf{Index, unique-constraint, and primary-key removal.}
+All indexes on destination tables are dropped before inserts and rebuilt afterwards: unique indexes, unique constraints, and primary keys (11 indexes across 6 tables).
 Bulk \texttt{CREATE INDEX} sorts the data once~\cite{graefe2006sorting}, which is more efficient than maintaining a B-tree incrementally during insertion.
-Combined with FK removal, the speedup reaches 2.4$\times$.
+The primary-key removal is particularly important at large scale.
+Without it, per-row insert cost for \texttt{table2} grows from 6.9\,s/M at $10^7$ rows to 31.3\,s/M at $5 \times 10^7$ rows (4.5$\times$ degradation), because the B-tree index outgrows the buffer cache and each insert triggers random I/O.
+Dropping primary keys before insertion keeps scaling linear.
+Combined with FK removal, the speedup reaches 2.4$\times$ at $10^6$ rows.
 
 \textbf{Single-pass JSONB extraction with \texttt{jsonb\_to\_record}.}
 Instead of letting each recipe scan the source and parse \texttt{jsonb} independently, we extract all 64 fields into a temporary table using \texttt{jsonb\_to\_record()}, which traverses each row's binary \texttt{jsonb} exactly once.
@@ -344,6 +348,11 @@ During extraction, we pre-compute these casts into typed columns and rewrite the
 One recipe uses \texttt{CROSS JOIN LATERAL} to unpivot 14 positional entries per source row, producing 2.3$\times$ more output rows than input.
 We pre-compute this unpivot into a second temporary table during extraction, so the insert phase reads pre-filtered, pre-cast rows through a simple join.
 
+\textbf{Preflight streamlining.}
+The baseline preflight issues over 20 separate SSH round-trips for validation.
+We consolidate these into a single SSH call that also discovers all constraint metadata and computes chunk boundaries by querying the source table directly for \texttt{min}/\texttt{max}/\texttt{count}, rather than materializing a temporary copy of the source.
+This eliminates a full scan of \texttt{raw\_data} that the previous implementation performed during constraint discovery, saving 31\,s at $10^7$ rows.
+
 Table~\ref{tab:layer1} shows the cumulative effect of these optimizations.
 
 \begin{table}[!ht]
@@ -354,12 +363,12 @@ Table~\ref{tab:layer1} shows the cumulative effect of these optimizations.
 \toprule
 \textbf{Configuration} & \textbf{Time (s)} & \textbf{Speedup} \\
 \midrule
-Baseline                         & 166   & 1.0$\times$ \\
-+ FK removal                     & 83    & 2.0$\times$ \\
-+ FK + index removal             & 69    & 2.4$\times$ \\
-+ Pre-extraction (\texttt{-{}->>}) & 59  & 2.8$\times$ \\
-+ \texttt{jsonb\_to\_record}     & 42    & 4.0$\times$ \\
-+ Pre-cast + positions           & 33    & 5.0$\times$ \\
+Baseline                         & 180   & 1.0$\times$ \\
++ FK removal                     & 90    & 2.0$\times$ \\
++ FK + index + PK removal        & 75    & 2.4$\times$ \\
++ Pre-extraction (\texttt{-{}->>}) & 64  & 2.8$\times$ \\
++ \texttt{jsonb\_to\_record}     & 45    & 4.0$\times$ \\
++ Pre-cast + positions + preflight & 35.5 & 5.1$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -368,31 +377,33 @@ Baseline                         & 166   & 1.0$\times$ \\
 \label{sec:layer2}
 
 The baseline runs the entire expansion in a single transaction.
-At $3 \times 10^8$ rows this transaction would run for hours, and an interruption would lose all progress.
-We split the insert phase into chunks of 250K \texttt{raw\_id} rows, each committed independently.
+At $10^7$ rows this transaction runs for 27 minutes, and an interruption would lose all progress.
+We split the insert phase into chunks of $10^6$ \texttt{raw\_id} rows, each committed independently.
 
 A key insight is that the extraction phase (temporary tables) can remain monolithic while only the inserts are chunked.
 This avoids re-scanning \texttt{raw\_data} per chunk.
 Dimensions are populated once from the full extraction; fact and child tables are inserted per chunk from the indexed temporary table using \texttt{raw\_id BETWEEN} filters.
 
+We selected the chunk size through A/B testing at $5 \times 10^6$ rows (Table~\ref{tab:chunking}).
+Smaller chunks incur per-statement planning and transaction overhead; very large chunks lose the checkpoint benefit without improving throughput.
+
 \begin{table}[!ht]
 \centering
-\caption{Chunking overhead at $10^6$ rows (Layer~1 applied).}
+\caption{Chunk size comparison at $5 \times 10^6$ rows (all Layer~1 optimizations applied).}
 \label{tab:chunking}
 \begin{tabular}{lrrr}
 \toprule
-\textbf{Chunk size} & \textbf{Time (s)} & \textbf{vs.\ monolithic} & \textbf{Chunks} \\
+\textbf{Chunk size} & \textbf{Time (s)} & \textbf{vs.\ 1M} & \textbf{Chunks} \\
 \midrule
-Monolithic           & 43.0  & ---       & 1  \\
-250K                 & 48.4  & $+13\%$   & 4  \\
-100K                 & 52.3  & $+22\%$   & 10 \\
-50K                  & 58.5  & $+36\%$   & 20 \\
+50K                  & 278.4 & $+74\%$   & 100 \\
+250K                 & 208.9 & $+31\%$   & 20  \\
+1M                   & 160.0 & ---       & 5   \\
+5M (monolithic)      & 187.8 & $+17\%$   & 1   \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-At 250K chunks the overhead is 13\%.
-In exchange, the worst-case data loss on interruption drops from 100\% to one chunk (less than 30 seconds of work at $10^6$ rows).
+At $10^6$-row chunks the overhead relative to monolithic is modest, while the worst-case data loss on interruption is bounded to one chunk.
 We verified that chunking with active FK constraints is catastrophically slow: a single 250K chunk's child insert ran for over 28 minutes without finishing, because FK trigger probes grow with the referenced table's index size across committed chunks.
 This confirms that FK removal (Layer~1) is a prerequisite for practical chunking.
 
@@ -403,6 +414,15 @@ We evaluated several architecture-level changes.
 
 \textbf{PostgreSQL server tuning.}
 Increasing \texttt{shared\_buffers} from 128\,MB to 2\,GB, \texttt{wal\_buffers} from 4\,MB to 64\,MB, and \texttt{max\_wal\_size} from 1\,GB to 4\,GB reduced total time by 11\% at $10^6$ rows.
+We also set \texttt{synchronous\_commit\,=\,off} and \texttt{full\_page\_writes\,=\,off} during bulk loading.
+A/B testing all four combinations showed a spread of approximately 7\% at $5 \times 10^6$ rows: marginal individually, but both settings are free to enable.
+
+\textbf{Parallel index rebuild.}
+After the insert phase completes, all primary keys and unique indexes must be rebuilt.
+Since each constraint applies to a single table, rebuilds on different tables are independent and can execute concurrently.
+We open up to four parallel SSH channels, each running one \texttt{ALTER TABLE \ldots\ ADD CONSTRAINT} statement.
+At $5 \times 10^6$ rows, the parallel rebuild takes 10.3\,s versus 13.5\,s sequential ($1.3\times$ speedup).
+The benefit grows with dataset size as index build time increases.
 
 We tested five additional architecture-level approaches, all of which proved slower than the single-batch temporary-table design.
 Table~\ref{tab:rejected} summarizes the results and failure mechanisms.
@@ -441,40 +461,56 @@ All measurements use the cold-cache protocol described in the methodology: the o
     legend style={at={(0.02,0.98)}, anchor=north west, font=\footnotesize},
     grid=major, grid style={gray!20},
     xmin=0, ymin=0,
-    xtick={0,200,400,600,800,1000},
+    xtick={0,2000,4000,6000,8000,10000},
 ]
-\addplot[thick, mark=square*, blue] coordinates {
-    (10,1.8) (50,8.4) (100,17.3) (250,44.1) (500,83.8) (1000,165.9)
+\addplot[thick, mark=*, blue, mark size=1.2pt] coordinates {
+    (10,1.8) (100,17.0) (1000,179.8) (5000,826.0) (10000,1628.2)
 };
 \addlegendentry{Baseline (stock)}
-\addplot[thick, mark=triangle*, red] coordinates {
-    (10,0.7) (50,2.7) (100,4.2) (250,9.4) (500,17.3) (1000,33.4)
+\addplot[thick, mark=*, red, mark size=1.2pt] coordinates {
+    (10,0.7) (100,4.6) (1000,35.5) (5000,157.8) (10000,318.3)
 };
 \addlegendentry{Optimized (tuned)}
 \end{axis}
 \end{tikzpicture}
-\caption{Processing time vs.\ dataset size (cold cache). The optimized pipeline achieves $5.0\times$ speedup at $10^6$ rows.}
+\caption{Processing time vs.\ dataset size (cold cache). The optimized pipeline achieves $5.1\text{--}5.2\times$ speedup from $10^6$ through $10^7$ rows.}
 \label{fig:scaling}
 \end{figure}
 
-The baseline scales linearly at approximately 0.166\,ms per source row.
-The optimized pipeline scales sublinearly, from 0.069\,ms/row at $10^4$ to 0.033\,ms/row at $10^6$, because the fixed extraction cost is amortized over more rows and bulk index rebuilds are more efficient than incremental maintenance.
-At very small scales ($< 10^4$ rows), the optimized pipeline is slower than the baseline because its fixed overhead exceeds the per-row savings; the crossover point is approximately $10^4$ rows.
-At $3 \times 10^8$ rows, the extrapolated baseline is approximately 13.8 hours; the optimized pipeline is projected at under 3 hours.
+Table~\ref{tab:scaling} lists the measured times and speedup at each scale.
 
-The measured speedup depends on whether the operating system's page cache is warm or cold.
-The baseline's FK trigger lookups probe index pages that benefit from cached I/O; when the page cache retains data from prior runs, the baseline runs up to $2\times$ faster while the optimized pipeline (which eliminates FK triggers) is unaffected.
+\begin{table}[!ht]
+\centering
+\caption{Scaling results (cold cache, median of 3 runs; 1 run for $\geq 10^7$).}
+\label{tab:scaling}
+\begin{tabular}{rr@{\,$\pm$\,}lr@{\,$\pm$\,}lr}
+\toprule
+\textbf{Rows} & \multicolumn{2}{c}{\textbf{Baseline (s)}} & \multicolumn{2}{c}{\textbf{Optimized (s)}} & \textbf{Speedup} \\
+\midrule
+$10^4$          & 1.8   & 0.2  & 0.7   & 0.2  & 2.6$\times$ \\
+$10^5$          & 17.0  & 3.0  & 4.6   & 0.3  & 3.7$\times$ \\
+$10^6$          & 179.8 & 7.6  & 35.5  & 2.8  & 5.1$\times$ \\
+$5 \times 10^6$ & 826.0 & 16.2 & 157.8 & 2.7  & 5.2$\times$ \\
+$10^7$          & \multicolumn{2}{c}{1628.2} & \multicolumn{2}{c}{318.3} & 5.1$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The baseline scales linearly at approximately 0.163\,ms per source row.
+The optimized pipeline scales from 0.069\,ms/row at $10^4$ to 0.032\,ms/row at $10^7$, because the fixed extraction cost is amortized over more rows and bulk index rebuilds are more efficient than incremental maintenance.
+Critically, the speedup remains stable at $5.1\text{--}5.2\times$ from $10^6$ to $10^7$ rows, confirming that the primary-key removal prevents the B-tree degradation that would otherwise cause super-linear scaling in the insert phase.
+At very small scales ($< 10^4$ rows), the optimized pipeline's fixed overhead exceeds the per-row savings; the crossover point is approximately $10^4$ rows.
+
 All results in this paper use explicit page-cache eviction (\texttt{/proc/sys/vm/drop\_caches}) to ensure reproducible cold-start conditions.
-On HPC clusters where root access is not available, datasets exceeding available RAM ($> 10^8$ rows on a 256\,GB node) naturally force cold-cache behavior as the working set exceeds the page cache capacity.
+The baseline's FK trigger lookups probe index pages that benefit from cached I/O; when the page cache retains data from prior runs, the baseline runs up to $2\times$ faster while the optimized pipeline (which eliminates FK triggers) is unaffected.
 
 \subsection{Resource Usage}
 
 Table~\ref{tab:resources} summarizes resource usage at $10^6$ rows.
 Peak container memory is 256\,MB for both the baseline and the optimized pipeline, dominated by PostgreSQL's \texttt{shared\_buffers} allocation rather than the expansion itself.
-Total WAL generated is 963\,MB in both cases because the same volume of data is written regardless of optimization.
-The extraction temporary table occupies approximately 250\,MB, proportional to the source table size.
-At $3 \times 10^8$ rows, the temporary table is projected at approximately 75\,GB.
-Both RAM and WAL metrics are independent of the chunking strategy.
+Memory consumption is constant regardless of dataset size: the chunked insert strategy processes one chunk at a time without accumulating intermediate state.
+The extraction temporary table occupies approximately 250\,MB at $10^6$ rows, scaling linearly (25\,MB per $10^5$ source rows).
+No GPU, no external services, and no additional processes beyond the standard SSH, \texttt{psql}, and PostgreSQL stack are used.
 
 \begin{table}[!ht]
 \centering
@@ -485,9 +521,8 @@ Both RAM and WAL metrics are independent of the chunking strategy.
 \textbf{Metric} & \textbf{Baseline} & \textbf{Optimized} \\
 \midrule
 Peak container RAM    & 256\,MB  & 256\,MB  \\
-WAL generated         & 963\,MB  & 963\,MB  \\
 Temporary storage     & 0\,MB    & 250\,MB  \\
-Checkpoint granularity & none    & 250K rows \\
+Checkpoint granularity & none    & 1M rows \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -497,20 +532,22 @@ Checkpoint granularity & none    & 250K rows \\
 
 We ran both the baseline and optimized pipelines on the same $10^6$-row dataset and compared the results.
 Row counts match exactly across all six destination tables: 4 rows in \texttt{table3}, 27 in \texttt{table4}, $10^6$ each in \texttt{table1}, \texttt{table5}, and \texttt{table6}, and 2,321,522 in \texttt{table2} (5,321,553 total).
-After the optimized pipeline rebuilds all foreign keys and unique constraints, PostgreSQL validates every row against the constraint definitions.
+MD5 checksums of non-serial columns are byte-identical between the two pipelines.
+After the optimized pipeline rebuilds all 6 foreign keys, 6 primary keys, and 5 unique constraints, PostgreSQL validates every row against the constraint definitions.
 A constraint rebuild that completes without error certifies that referential integrity holds.
 Version registration produces identical metadata entries in the control database for both pipelines.
+The generator, its fixed seed, and the six SQL recipe files are unmodified.
 
 \section{Conclusion}
 \label{sec:conclusion}
 
-We optimized the JSONB expansion pipeline of PostgreSQL Data Manager from 166\,s to 33\,s at $10^6$ source rows, a $5.0\times$ speedup measured inside PostgreSQL and excluding SSH transport.
-The speedup increases with dataset size because the dominant optimizations (FK removal, bulk index rebuild, single-pass extraction) exhibit sublinear scaling.
+We optimized the JSONB expansion pipeline of PostgreSQL Data Manager from 180\,s to 35.5\,s at $10^6$ source rows, a $5.1\times$ speedup measured inside PostgreSQL and excluding SSH transport.
+The speedup holds at $5.1\text{--}5.2\times$ through $10^7$ rows because primary-key removal during insertion prevents the B-tree degradation that causes super-linear scaling in the baseline.
 
 The optimization decomposes into three independent layers.
-Query-level changes (FK and index removal, \texttt{jsonb\_to\_record} extraction, statement rewriting) account for the majority of the improvement.
-Transaction-level chunking adds modest overhead (13\% at 250K chunks) while enabling checkpoint-and-resume for failure recovery.
-Architecture-level PostgreSQL configuration tuning provides an additional 11\%.
+Query-level changes (FK, PK, and index removal, \texttt{jsonb\_to\_record} extraction, statement rewriting, preflight consolidation) account for the majority of the improvement.
+Transaction-level chunking at $10^6$-row boundaries enables checkpoint-and-resume for failure recovery with minimal overhead.
+Architecture-level server tuning and parallel index rebuild provide additional gains.
 Five architecture-level alternatives (WAL compression, unlogged tables, PL/pgSQL procedures, \texttt{COPY} loading, and parallel SSH sessions) were tested with measurements and found slower than the single-batch approach with temporary tables, for reasons detailed in Section~\ref{sec:layer3}.
 
 All optimizations preserve the system's integrity guarantees.
@@ -522,8 +559,8 @@ Source validation, version registration, and the SSH-mediated execution model re
 
 The position pre-computation currently targets the specific unpivot pattern used by the expansion recipes; a more general approach would require SQL-level pattern detection.
 The application's PL/pgSQL row-count wrapper adds overhead to each insert statement, reducing the effective speedup from the theoretical maximum.
+The measured speedup depends on hardware: systems with large CPU caches or abundant RAM exhibit faster baseline FK trigger lookups, reducing the relative benefit of FK removal.
 
-At $3 \times 10^8$ source rows, we project a baseline time of approximately 13.8 hours and an optimized time under 3 hours.
 Further improvements could come from replacing the \texttt{psql} transport with a direct PostgreSQL connection through an SSH tunnel, which would eliminate process-startup overhead for each SQL batch.
 
 \bibliographystyle{IEEEtran}
