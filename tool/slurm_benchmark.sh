@@ -53,8 +53,10 @@ else
 fi
 
 # Local storage (NVMe/SSD preferred over NFS)
-for d in "/scratch/${USER}" "/tmp"; do
-    [ -d "${d}" ] && LOCAL_DIR="${d}/pgdm_${SLURM_JOB_ID:-$$}" && break
+for d in "/ssd/${USER}" "/scratch/${USER}" "/tmp"; do
+    if [ -d "$(dirname "${d}")" ]; then
+        mkdir -p "${d}" 2>/dev/null && LOCAL_DIR="${d}/pgdm_${SLURM_JOB_ID:-$$}" && break
+    fi
 done
 mkdir -p "${LOCAL_DIR}" "${RESULTS_DIR}"
 PG_DATA="${LOCAL_DIR}/pgdata"
