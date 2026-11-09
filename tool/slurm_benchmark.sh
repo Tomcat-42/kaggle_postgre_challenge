@@ -150,10 +150,24 @@ grep -q "^port = ${PG_PORT}" "${PG_DATA}/postgresql.conf" || \
 
 start_pg() { "${PG_BIN_DIR}/pg_ctl" -D "${PG_DATA}" -l "${LOCAL_DIR}/pg.log" -o "-p ${PG_PORT}" start -w >/dev/null 2>&1; }
 stop_pg()  { "${PG_BIN_DIR}/pg_ctl" -D "${PG_DATA}" stop -m fast -w >/dev/null 2>&1 || true; }
+drop_page_cache() {
+    sync
+    if sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
+        return
+    fi
+    # Fallback: fill RAM via tmpfs to force kernel to evict page cache
+    local avail_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+    local fill_mb=$(( avail_mb * 9 / 10 ))
+    local shm_avail_mb=$(df -BM /dev/shm | tail -1 | awk '{print int($4)}')
+    [ "${fill_mb}" -gt "${shm_avail_mb}" ] && fill_mb=${shm_avail_mb}
+    dd if=/dev/zero of=/dev/shm/pgdm_cache_flush bs=1M count=${fill_mb} 2>/dev/null || true
+    rm -f /dev/shm/pgdm_cache_flush
+}
+
 cold_start() {
     local cfg=$1
     stop_pg
-    sync; sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null || true
+    drop_page_cache
     write_config "${cfg}"
     start_pg
     sleep 1
