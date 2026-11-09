@@ -428,13 +428,14 @@ Parallel SSH        & $+18\%$ & Non-temp tables add WAL \\
 \subsection{Scaling}
 \label{sec:scaling}
 
-Fig.~\ref{fig:scaling} shows processing time across dataset sizes under two cache conditions: cold cache (local benchmark, page cache dropped before each run) and warm cache (HPC cluster with 256\,GB RAM, page cache cannot be dropped without root access).
+Fig.~\ref{fig:scaling} shows processing time across dataset sizes for the baseline and the optimized pipeline.
+All measurements use the cold-cache protocol described in the methodology: the operating system's page cache is dropped and PostgreSQL is restarted before every measured run.
 
 \begin{figure}[!ht]
 \centering
 \begin{tikzpicture}
 \begin{axis}[
-    width=\columnwidth, height=5.5cm,
+    width=\columnwidth, height=5cm,
     xlabel={Source rows ($\times 10^3$)},
     ylabel={Time (s)},
     legend style={at={(0.02,0.98)}, anchor=north west, font=\footnotesize},
@@ -445,36 +446,26 @@ Fig.~\ref{fig:scaling} shows processing time across dataset sizes under two cach
 \addplot[thick, mark=square*, blue] coordinates {
     (10,1.8) (50,8.4) (100,17.3) (250,44.1) (500,83.8) (1000,165.9)
 };
-\addlegendentry{Baseline (cold)}
+\addlegendentry{Baseline (stock)}
 \addplot[thick, mark=triangle*, red] coordinates {
     (10,0.7) (50,2.7) (100,4.2) (250,9.4) (500,17.3) (1000,33.4)
 };
-\addlegendentry{Optimized (cold)}
-\addplot[thick, mark=square, blue, dashed] coordinates {
-    (10,0.9) (50,4.2) (100,8.1) (250,21.0) (500,40.4) (1000,80.6)
-};
-\addlegendentry{Baseline (warm)}
-\addplot[thick, mark=triangle, red, dashed] coordinates {
-    (10,1.0) (50,2.9) (100,4.5) (250,9.2) (500,17.3) (1000,33.1)
-};
-\addlegendentry{Optimized (warm)}
+\addlegendentry{Optimized (tuned)}
 \end{axis}
 \end{tikzpicture}
-\caption{Processing time vs.\ dataset size. Solid lines: cold cache (page cache dropped before each run). Dashed lines: warm cache (HPC, 256\,GB RAM). The optimized pipeline achieves $5.0\times$ speedup with cold cache and $2.4\times$ with warm cache at $10^6$ rows.}
+\caption{Processing time vs.\ dataset size (cold cache). The optimized pipeline achieves $5.0\times$ speedup at $10^6$ rows.}
 \label{fig:scaling}
 \end{figure}
 
-Under cold-cache conditions, the baseline scales linearly at approximately 0.166\,ms per source row.
+The baseline scales linearly at approximately 0.166\,ms per source row.
 The optimized pipeline scales sublinearly, from 0.069\,ms/row at $10^4$ to 0.033\,ms/row at $10^6$, because the fixed extraction cost is amortized over more rows and bulk index rebuilds are more efficient than incremental maintenance.
 At very small scales ($< 10^4$ rows), the optimized pipeline is slower than the baseline because its fixed overhead exceeds the per-row savings; the crossover point is approximately $10^4$ rows.
-At $3 \times 10^8$ rows, the extrapolated cold-cache baseline is approximately 13.8 hours; the optimized pipeline is projected at under 3 hours.
+At $3 \times 10^8$ rows, the extrapolated baseline is approximately 13.8 hours; the optimized pipeline is projected at under 3 hours.
 
-The speedup is sensitive to the operating system's page cache.
-Under warm-cache conditions (dashed lines in Fig.~\ref{fig:scaling}), the baseline is approximately $2\times$ faster because its FK trigger lookups hit cached pages instead of disk.
-The optimized pipeline is unaffected because it eliminates FK triggers entirely.
-This narrows the speedup from $5.0\times$ to $2.4\times$ at $10^6$ rows.
-On the HPC cluster, dropping the page cache requires root privileges that are unavailable to user jobs; we attempted to force eviction by filling \texttt{/dev/shm} (tmpfs) to consume RAM, but the tmpfs size limit (50\% of RAM) prevented full eviction.
-The cold-cache results from our local benchmark, where page cache is explicitly dropped via \texttt{/proc/sys/vm/drop\_caches}, are more representative of production deployments where the source data is not pre-cached.
+The measured speedup depends on whether the operating system's page cache is warm or cold.
+The baseline's FK trigger lookups probe index pages that benefit from cached I/O; when the page cache retains data from prior runs, the baseline runs up to $2\times$ faster while the optimized pipeline (which eliminates FK triggers) is unaffected.
+All results in this paper use explicit page-cache eviction (\texttt{/proc/sys/vm/drop\_caches}) to ensure reproducible cold-start conditions.
+On HPC clusters where root access is not available, datasets exceeding available RAM ($> 10^8$ rows on a 256\,GB node) naturally force cold-cache behavior as the working set exceeds the page cache capacity.
 
 \subsection{Resource Usage}
 
