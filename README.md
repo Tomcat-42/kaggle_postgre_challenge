@@ -1,65 +1,38 @@
 # PostgreSQL Data Pipeline Optimization
 
-Optimized expansion pipeline for [PostgreSQL Data Manager](https://github.com/igorsiecz/kaggle_postgre_challenge).
-Reduces the measured processing time of the JSONB-to-relational expansion by 5.1x through query redesign, constraint management, transaction chunking, and server tuning. Speedup holds from 10^6 through 10^7 source rows.
+5.1x faster JSONB expansion for [PostgreSQL Data Manager](https://github.com/igorsiecz/kaggle_postgre_challenge), holding from 10^6 through 10^7 source rows.
 
 Paper: [`doc/build/main.pdf`](doc/build/main.pdf)
 
-## Requirements
+## Reproduce (3 commands)
 
-- Python 3.10+
-- PostgreSQL 17 with `psql`, `pg_dump`, `pg_restore`
-- SSH server on the PostgreSQL host
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip
-
-## Quick start
+Requires: [Podman](https://podman.io/) (or Docker) and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-# 1. Start PostgreSQL + SSH (container)
-podman-compose -f container/compose.yaml up -d
+# 1. Start PostgreSQL + SSH container
+podman compose -f container/compose.yaml up -d
+# (or: docker compose -f container/compose.yaml up -d)
 
-# 2. Install dependencies
+# 2. Install Python dependencies
 uv sync
 
-# 3. Generate the dataset (100K rows)
-export PG_KAGGLE_CHALLENGE_PASS=challenge
-.venv/bin/python tool/generate_database.py \
-    --rows 100000 --host localhost --postgres_port 5432 \
-    --user challenge --admin_database postgres
-
-# 4. Run the expansion
-.venv/bin/python -m pgdm
+# 3. Run the benchmark
+sudo -v && .venv/bin/python tool/local_benchmark.py
 ```
 
-Connect to `localhost:2222` (SSH) / `localhost:5432` (PostgreSQL) with user `challenge`, password `challenge`.
-Open `kaggle_challenge` → `raw_data` → Expand.
+The benchmark generates datasets from 10K to 50M rows, runs both baseline and optimized expansions under cold-cache conditions (page cache dropped, PG restarted before each run), and reports the median of 3 measured runs. Requires `sudo` for page cache eviction. Results are saved to `results/local/`.
 
-## Reproduce the benchmark
+Container credentials: user `challenge`, password `challenge`, SSH port 2222, PG port 5432.
 
-### Local (with container)
+## Results
 
-```bash
-.venv/bin/python tool/local_benchmark.py
-```
-
-Runs baseline (stock config) and optimized (tuned config) from 10K to 50M rows.
-Drops OS page cache and restarts PostgreSQL between runs.
-Reports median of 3 measured runs after 1 warmup (1 run for scales above 10M).
-
-Results are saved to `results/local/definitive_benchmark.json`.
-
-### Cluster (Slurm)
-
-```bash
-sbatch -p <partition> tool/slurm_benchmark.sh 10K 100K 1M 10M
-```
-
-Accepts scale arguments: `10K`, `50K`, `100K`, `250K`, `500K`, `1M`, `5M`, `10M`, `50M`, `100M`, `300M`.
-Installs PostgreSQL from source if not available.
-Auto-tunes `shared_buffers` to 25% of RAM.
-Uses local NVMe (`/ssd` or `/scratch`) for database storage.
-
-Results are saved to `results/run_<jobid>/`.
+| Source rows | Baseline | Optimized | Speedup |
+|---|---|---|---|
+| 10K | 1.8 s | 0.7 s | 2.6x |
+| 100K | 17.0 s | 4.6 s | 3.7x |
+| 1M | 179.8 s | 35.5 s | **5.1x** |
+| 5M | 826.0 s | 157.8 s | **5.2x** |
+| 10M | 1628.2 s | 318.3 s | **5.1x** |
 
 ## Tests
 
@@ -76,18 +49,16 @@ cd doc && make all    # Output: doc/build/main.pdf
 ## Repository structure
 
 ```
-src/pgdm/
-  services/postgres_service.py    Core expansion logic (baseline + optimized)
-  app.py                          GUI application
-asset/sql/                        Six expansion recipes (unchanged)
-tool/
-  generate_database.py            Deterministic dataset generator (unchanged)
-  local_benchmark.py              Local benchmark with cold-cache protocol
-  slurm_benchmark.sh              Cluster benchmark (Slurm)
-container/                        PostgreSQL 17 + SSH container
-doc/src/                          Paper source (LaTeX)
-results/local/                    Benchmark data
-test/                             Test suite (6 tests)
+src/pgdm/services/postgres_service.py  Expansion logic (baseline + optimized)
+src/pgdm/app.py                        GUI application
+asset/sql/                             Six expansion recipes (unchanged)
+tool/generate_database.py              Dataset generator (unchanged)
+tool/local_benchmark.py                Benchmark with cold-cache protocol
+container/                             PostgreSQL 17 + SSH container
+doc/src/                               Paper source (LaTeX)
+results/                               Benchmark data
+submission/                            Paper PDF, writeup, figures
+test/                                  Test suite
 ```
 
 ## License
