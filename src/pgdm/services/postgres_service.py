@@ -15102,7 +15102,7 @@ FROM pg_temp.pgdm_expansion_timings WHERE finished_at IS NOT NULL;""".strip())
                                 errs.append((stmt[:60], e))
                     threads = []
                     for stmt in rebuild_stmts:
-                        t = _thr.Thread(target=_rebuild_one, args=(stmt, errors))
+                        t = threading.Thread(target=_rebuild_one, args=(stmt, errors))
                         threads.append(t)
                         t.start()
                     for t in threads:
