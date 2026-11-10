@@ -75,7 +75,6 @@ Measured via `podman stats` (peak container memory, sampled every 500 ms) and `p
 
 ## Submission
 
-- **Repository:** [this repo]
-- **Commit:** [current HEAD]
+- **Repository:** this repo
 - **Paper:** `doc/build/main.pdf`
 - **Benchmark reproduction:** `sudo -v && .venv/bin/python tool/local_benchmark.py`
