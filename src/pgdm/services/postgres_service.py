@@ -15088,9 +15088,8 @@ FROM pg_temp.pgdm_expansion_timings WHERE finished_at IS NOT NULL;""".strip())
                 for idx in idx_list:
                     rebuild_stmts.append(f"{idx['add_ddl']};")
                 if len(rebuild_stmts) > 1:
-                    import threading as _thr
                     max_par = 4
-                    sem = _thr.Semaphore(max_par)
+                    sem = threading.Semaphore(max_par)
                     errors = []
                     def _rebuild_one(stmt, errs):
                         with sem:
