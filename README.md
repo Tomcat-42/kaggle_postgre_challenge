@@ -1,8 +1,10 @@
 # PostgreSQL Data Pipeline Optimization
 
-5.1x faster JSONB expansion for [PostgreSQL Data Manager](https://github.com/igorsiecz/kaggle_postgre_challenge), holding from 10^6 through 10^7 source rows.
+5.1x faster JSONB expansion, holding from 10^6 through 10^7 source rows.
 
-Paper: [`doc/build/main.pdf`](doc/build/main.pdf)
+Based on [PostgreSQL Data Manager](https://github.com/igorsiecz/kaggle_postgre_challenge) (see upstream repo for application details, usage, and the original codebase).
+
+Paper: [`doc/build/main.pdf`](doc/build/main.pdf) | Writeup: [`submission/writeup.md`](submission/writeup.md)
 
 ## Reproduce (3 commands)
 
