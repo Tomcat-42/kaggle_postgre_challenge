@@ -26,6 +26,14 @@ The benchmark generates datasets from 10K to 50M rows, runs both baseline and op
 
 Container credentials: user `challenge`, password `challenge`, SSH port 2222, PG port 5432.
 
+## What changed
+
+**No changes** to the dataset generator, its fixed seed, or the six SQL recipe files.
+
+**Application code** (`src/pgdm/services/postgres_service.py`, `src/pgdm/app.py`): the Expand operation calls a new optimized method that extracts JSONB fields once via `jsonb_to_record()`, drops all constraints (FK, PK, unique) before inserts, inserts in 1M-row chunks, and rebuilds constraints in parallel afterward.
+
+**PostgreSQL server**: the benchmark's tuned configuration sets `shared_buffers = 2GB`, `work_mem = 256MB`, `wal_buffers = 64MB`, `max_wal_size = 4GB`, `synchronous_commit = off`, `full_page_writes = off`. However, the optimization works on stock PG config too (28.9 s at 1M vs 35.5 s tuned). The speedup comes from the SQL redesign, not from server tuning.
+
 ## Results
 
 | Source rows | Baseline | Optimized | Speedup |
