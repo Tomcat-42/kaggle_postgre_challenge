@@ -6,7 +6,7 @@ Based on [PostgreSQL Data Manager](https://github.com/igorsiecz/kaggle_postgre_c
 
 Paper: [`doc/build/main.pdf`](doc/build/main.pdf) | Writeup: [`submission/writeup.md`](submission/writeup.md)
 
-## Reproduce (3 commands)
+## Reproducing
 
 Requires: [Podman](https://podman.io/) (or Docker) and [uv](https://docs.astral.sh/uv/).
 
@@ -45,22 +45,7 @@ Container credentials: user `challenge`, password `challenge`, SSH port 2222, PG
 ## Build the paper
 
 ```bash
-cd doc && make all    # Output: doc/build/main.pdf
-```
-
-## Repository structure
-
-```
-src/pgdm/services/postgres_service.py  Expansion logic (baseline + optimized)
-src/pgdm/app.py                        GUI application
-asset/sql/                             Six expansion recipes (unchanged)
-tool/generate_database.py              Dataset generator (unchanged)
-tool/local_benchmark.py                Benchmark with cold-cache protocol
-container/                             PostgreSQL 17 + SSH container
-doc/src/                               Paper source (LaTeX)
-results/                               Benchmark data
-submission/                            Paper PDF, writeup, figures
-test/                                  Test suite
+cd doc && make all
 ```
 
 ## License
