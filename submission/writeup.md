@@ -1,8 +1,9 @@
 # Project Description
 
-**5.1x faster expansion, crash-safe, same memory footprint.**
+**5.1x faster expansion, crash-safe, linear resource scaling.**
 
-We redesigned the JSONB expansion pipeline of PostgreSQL Data Manager to reduce processing time from 180 s to 35.5 s at 10^6 source rows. The speedup holds at 5.1--5.2x through 10^7 rows under cold-cache conditions.
+We redesigned the JSONB expansion pipeline of PostgreSQL Data Manager to reduce processing time from 180 s to 35.5 s at 10^6 source rows. The speedup holds at 5.1--5.2x through 10^7 rows under cold-cache conditions (OS page cache dropped, PG restarted before each run).
+
 Every optimization was validated through A/B testing. All integrity guarantees (FK, PK, unique, version registration) are preserved. The generator, seed, and SQL recipes are unmodified.
 
 ## Execution Time (primary metric)
@@ -50,10 +51,19 @@ The baseline offers no recovery: a single interruption loses all progress from a
 
 ## Resource Efficiency
 
-- **Peak RAM**: 256 MB for both baseline and optimized (dominated by `shared_buffers`, not the expansion itself). Memory usage is constant regardless of dataset size.
-- **Temporary storage**: proportional to source table size (250 MB at 1M rows, ~25 MB per 100K rows). Cleaned up automatically on completion.
+Measured via `podman stats` (peak container memory, sampled every 500 ms) and `pg_database_size()` (storage delta before/after expansion):
+
+| Source rows | Inserted | Peak memory (MB) | Storage growth (MB) |
+|---|---|---|---|
+| 10K | 53K | 1225 | 6 |
+| 100K | 532K | 416 | 60 |
+| 1M | 5.3M | 858 | 597 |
+| 5M | 26.6M | 3103 | 2982 |
+| 10M | 53.2M | 3934 | 5964 |
+
+- Peak memory is dominated by PostgreSQL's `shared_buffers` (2 GB in the tuned configuration) and grows as the buffer pool fills with active data.
+- Storage growth is proportional to inserted rows (~0.11 MB per thousand rows).
 - **No GPU, no external services, no additional processes** beyond the standard SSH + psql + PostgreSQL stack.
-- **WAL volume**: comparable to baseline (same data volume written regardless of optimization).
 
 ## Correctness
 

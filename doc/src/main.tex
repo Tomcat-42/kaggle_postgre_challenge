@@ -207,8 +207,8 @@ The final table, \texttt{table2}, unpivots up to 14 positional entries per sourc
 \end{figure}
 
 All destination tables enforce referential integrity through foreign keys with \texttt{ON UPDATE CASCADE ON DELETE CASCADE}.
-The six tables carry a total of eleven indexes, including primary keys, unique constraints, and partial unique indexes.
-Every row inserted must satisfy these constraints and update every applicable index.
+The six tables carry a total of 6 primary keys, 5 unique indexes (including partial), and 6 foreign keys.
+Every inserted row must satisfy these constraints and update every applicable index.
 
 \subsection{Integrity Guarantees}
 \label{sec:guarantees}
@@ -285,16 +285,14 @@ Other                   & 0.03  & 0.3  \\
 \end{tabular}
 \end{table}
 
-Two costs dominate.
-Foreign-key triggers account for 47\% of total time: every \texttt{INSERT} fires per-row constraint checks that probe referenced tables through index lookups~\cite{hellerstein2007architecture}.
-For \texttt{table6}, whose rows reference both \texttt{table1} and \texttt{table4}, FK validation consumes 77.5\% of execution time.
-JSONB field extraction accounts for 40\%: PostgreSQL's \texttt{-{}->{}>'key'} operator traverses the binary \texttt{jsonb} structure independently for each field, and the six recipes collectively perform $6 \times 64 = 384$ field traversals per source row.
-The remaining costs (heap writes, index maintenance, sequential scans) account for 13\%.
-Python-side work (preparation, preflight, version registration) totals under 50\,ms.
+Foreign-key triggers account for 47\%: every \texttt{INSERT} fires per-row constraint checks that probe referenced tables through index lookups~\cite{hellerstein2007architecture}.
+For \texttt{table6}, whose rows reference both \texttt{table1} and \texttt{table4}, FK validation alone consumes 77.5\% of its execution time.
+JSONB field extraction accounts for 40\%: PostgreSQL's \texttt{-{}->{}>'key'} operator traverses the binary \texttt{jsonb} structure independently for each field, and the six recipes collectively perform $6 \times 64 = 384$ traversals per source row.
+Heap writes, index maintenance, and sequential scans account for the remaining 13\%.
+Python-side overhead (preparation, preflight, version registration) is negligible at under 50\,ms.
 
-Table~\ref{tab:per_recipe} shows the per-recipe breakdown.
-The two dimension tables are cheap in absolute terms but scan the full source for \texttt{DISTINCT} values.
-The fact and child tables are dominated by FK trigger overhead, which grows with the size of the referenced index.
+The per-recipe breakdown (Table~\ref{tab:per_recipe}) shows that dimension tables are cheap but scan the full source for \texttt{DISTINCT} values.
+Fact and child tables are dominated by FK trigger overhead.
 The unpivot recipe (\texttt{table2}) expands each source row into 14 candidates via \texttt{CROSS JOIN LATERAL} and filters to 2.3 on average, producing the largest output volume.
 
 \begin{table}[!ht]
@@ -492,9 +490,9 @@ The optimized pipeline improves from 0.069\,ms/row at $10^4$ to 0.032\,ms/row at
 The speedup remains stable at $5.1\text{--}5.2\times$ from $10^6$ through $10^7$ rows, confirming that primary-key removal prevents the B-tree degradation that would otherwise cause super-linear scaling.
 Below $10^4$ rows, the optimized pipeline's fixed overhead exceeds the per-row savings.
 
-The measured speedup is sensitive to page-cache state.
-The baseline's FK trigger lookups probe index pages that benefit from cached I/O; a warm page cache can make the baseline up to $2\times$ faster while the optimized pipeline (which eliminates FK triggers) is unaffected.
-All results reported here use explicit cache eviction to ensure cold-start conditions.
+The measured speedup depends on page-cache state.
+FK trigger lookups probe index pages that benefit from cached I/O, so a warm cache can make the baseline up to $2\times$ faster while the optimized pipeline is unaffected.
+All results use explicit cache eviction.
 
 \subsection{Resource Usage}
 
