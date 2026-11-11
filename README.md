@@ -2,37 +2,21 @@
 
 5.1x faster JSONB expansion, holding from 10^6 through 10^7 source rows.
 
-Based on [PostgreSQL Data Manager](https://github.com/igorsiecz/kaggle_postgre_challenge) (see upstream repo for application details, usage, and the original codebase).
+Based on [PostgreSQL Data Manager](https://github.com/igorsiecz/kaggle_postgre_challenge) (see upstream for application details and original codebase).
 
 Paper: [`doc/build/main.pdf`](doc/build/main.pdf) | Writeup: [`submission/writeup.md`](submission/writeup.md)
 
-## Reproducing
+## Quick start
 
-Requires: [Podman](https://podman.io/) (or Docker) and [uv](https://docs.astral.sh/uv/).
+Requires [Podman](https://podman.io/) (or Docker) and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-# 1. Start PostgreSQL + SSH container
-podman compose -f container/compose.yaml up -d
-# (or: docker compose -f container/compose.yaml up -d)
-
-# 2. Install Python dependencies
-uv sync
-
-# 3. Run the benchmark
-sudo -v && uv run bench
+podman compose -f container/compose.yaml up -d   # 1. start PostgreSQL + SSH
+uv sync                                           # 2. install dependencies
+sudo -v && uv run bench                           # 3. run benchmark
 ```
 
-The benchmark generates datasets from 10K to 50M rows, runs both baseline and optimized expansions under cold-cache conditions (page cache dropped, PG restarted before each run), and reports the median of 3 measured runs. Requires `sudo` for page cache eviction. Results are saved to `results/local/`.
-
-Container credentials: user `challenge`, password `challenge`, SSH port 2222, PG port 5432.
-
-## What changed
-
-**No changes** to the dataset generator, its fixed seed, or the six SQL recipe files.
-
-**Application code** (`src/pgdm/services/postgres_service.py`, `src/pgdm/app.py`): the Expand operation calls a new optimized method that extracts JSONB fields once via `jsonb_to_record()`, drops all constraints (FK, PK, unique) before inserts, inserts in 1M-row chunks, and rebuilds constraints in parallel afterward.
-
-**PostgreSQL server**: the benchmark's tuned configuration sets `shared_buffers = 2GB`, `work_mem = 256MB`, `wal_buffers = 64MB`, `max_wal_size = 4GB`, `synchronous_commit = off`, `full_page_writes = off`. However, the optimization works on stock PG config too (28.9 s at 1M vs 35.5 s tuned). The speedup comes from the SQL redesign, not from server tuning.
+Container: user `challenge`, password `challenge`, SSH port 2222, PG port 5432.
 
 ## Results
 
@@ -44,25 +28,22 @@ Container credentials: user `challenge`, password `challenge`, SSH port 2222, PG
 | 5M | 826.0 s | 157.8 s | **5.2x** |
 | 10M | 1628.2 s | 318.3 s | **5.1x** |
 
-## Run the GUI
+Cold cache (page cache dropped + PG restarted before each run), median of 3 runs.
 
-```bash
-uv run pgdm
-```
+## What changed
 
-Connect to `localhost:2222` (SSH) / `localhost:5432` (PG), user `challenge`, password `challenge`. Open `kaggle_challenge` -> `raw_data` -> Expand. Configure 6 destinations in order: `01_table3.sql` -> `public.table3`, ..., `06_table2.sql` -> `public.table2`. Click Run expansion. The `MEASURED PROCESSING TOTAL` in the performance report is the primary metric.
+- **Generator, seed, SQL recipes**: unchanged.
+- **Application code**: single-pass `jsonb_to_record()` extraction, drop all constraints before inserts, 1M-row chunked commits, parallel constraint rebuild.
+- **PG server tuning**: 2 GB `shared_buffers`, `synchronous_commit = off`, `full_page_writes = off`. The speedup comes from SQL redesign, not tuning (28.9 s on stock config vs 35.5 s tuned at 1M).
 
-## Tests
+## Commands
 
-```bash
-uv run test
-```
-
-## Build the paper
-
-```bash
-cd doc && make all
-```
+| Command | Description |
+|---|---|
+| `uv run pgdm` | Launch the GUI |
+| `uv run bench` | Run the full benchmark |
+| `uv run test` | Run the test suite |
+| `cd doc && make all` | Build the paper |
 
 ## License
 
