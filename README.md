@@ -19,7 +19,7 @@ podman compose -f container/compose.yaml up -d
 uv sync
 
 # 3. Run the benchmark
-sudo -v && uv run python tool/local_benchmark.py
+sudo -v && uv run bench
 ```
 
 The benchmark generates datasets from 10K to 50M rows, runs both baseline and optimized expansions under cold-cache conditions (page cache dropped, PG restarted before each run), and reports the median of 3 measured runs. Requires `sudo` for page cache eviction. Results are saved to `results/local/`.
@@ -55,7 +55,7 @@ Connect to `localhost:2222` (SSH) / `localhost:5432` (PG), user `challenge`, pas
 ## Tests
 
 ```bash
-uv run pytest test/ -v
+uv run test
 ```
 
 ## Build the paper

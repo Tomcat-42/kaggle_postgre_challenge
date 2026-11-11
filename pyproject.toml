@@ -22,6 +22,8 @@ dev = [
 
 [project.scripts]
 pgdm = "pgdm.app:main"
+bench = "pgdm.bench:main"
+test = "pgdm.test_runner:main"
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
