@@ -30,12 +30,6 @@ Container: user `challenge`, password `challenge`, SSH port 2222, PG port 5432.
 
 Cold cache (page cache dropped + PG restarted before each run), median of 3 runs.
 
-## What changed
-
-- **Generator, seed, SQL recipes**: unchanged.
-- **Application code**: single-pass `jsonb_to_record()` extraction, drop all constraints before inserts, 1M-row chunked commits, parallel constraint rebuild.
-- **PG server tuning**: 2 GB `shared_buffers`, `synchronous_commit = off`, `full_page_writes = off`. The speedup comes from SQL redesign, not tuning (28.9 s on stock config vs 35.5 s tuned at 1M).
-
 ## Commands
 
 | Command | Description |
