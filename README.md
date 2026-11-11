@@ -44,6 +44,14 @@ Container credentials: user `challenge`, password `challenge`, SSH port 2222, PG
 | 5M | 826.0 s | 157.8 s | **5.2x** |
 | 10M | 1628.2 s | 318.3 s | **5.1x** |
 
+## Run the GUI
+
+```bash
+uv run python -m pgdm
+```
+
+Connect to `localhost:2222` (SSH) / `localhost:5432` (PG), user `challenge`, password `challenge`. Open `kaggle_challenge` -> `raw_data` -> Expand. Configure 6 destinations in order: `01_table3.sql` -> `public.table3`, ..., `06_table2.sql` -> `public.table2`. Click Run expansion. The `MEASURED PROCESSING TOTAL` in the performance report is the primary metric.
+
 ## Tests
 
 ```bash
