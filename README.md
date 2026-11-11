@@ -1,17 +1,17 @@
 # PostgreSQL Data Pipeline Optimization
 
-5.1x faster JSONB expansion, holding from 10^6 through 10^7 source rows.
+**5.1x faster JSONB expansion**.
 
 Based on [PostgreSQL Data Manager](https://github.com/igorsiecz/kaggle_postgre_challenge) (see upstream for application details and original codebase).
 
-Paper: [`doc/build/main.pdf`](doc/build/main.pdf) | Writeup: [`submission/writeup.md`](submission/writeup.md)
+Paper: [`doc/build/main.pdf`](doc/build/main.pdf)
 
 ## Quick start
 
 Requires [Podman](https://podman.io/) (or Docker) and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-podman compose -f container/compose.yaml up -d   # 1. start PostgreSQL + SSH
+podman compose -f container/compose.yaml up -d    # 1. start PostgreSQL + SSH
 uv sync                                           # 2. install dependencies
 sudo -v && uv run bench                           # 3. run benchmark
 ```
