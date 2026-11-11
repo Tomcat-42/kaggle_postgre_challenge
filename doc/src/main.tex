@@ -544,11 +544,16 @@ The generator, seed, and recipe files are unmodified.
 The approach generalizes to any ETL pipeline where per-row constraint enforcement dominates insert cost.
 The key tradeoff is temporary storage for the materialized extraction, which scales linearly with source size.
 
-\subsection*{Limitations}
+\subsection*{Limitations and Future Work}
 
 The position pre-computation targets the specific unpivot pattern in these recipes; generalizing it would require SQL-level pattern detection.
 The measured speedup depends on hardware: systems with large CPU caches exhibit faster baseline FK trigger lookups, reducing the relative benefit of their removal.
-Replacing the \texttt{psql} transport with a direct PostgreSQL connection through an SSH tunnel would eliminate process-startup overhead and is the most promising direction for further gains.
+
+Our measurements reach $10^7$ source rows.
+Validating the scaling behavior at $10^8$ and beyond requires dedicated infrastructure; this is planned using the PCAD cluster at INF/UFRGS\footnote{\url{http://pcad.inf.ufrgs.br}}.
+Replacing the \texttt{psql} transport with a direct PostgreSQL connection through an SSH tunnel would eliminate process-startup overhead and is the most promising direction for further time reduction.
+A separate question is whether the positional data currently unpivoted through \texttt{CROSS JOIN LATERAL} could be represented more efficiently using PostgreSQL's vector extension (\texttt{pgvector}), storing the 14-element weight and position arrays as dense vectors rather than expanding them into individual rows.
+This would trade the current row-per-position model for a single vector per source row, potentially reducing both insert volume and storage, but would require changes to downstream queries that consume the expanded data.
 
 \bibliographystyle{IEEEtran}
 \bibliography{references}
