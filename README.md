@@ -19,7 +19,7 @@ podman compose -f container/compose.yaml up -d
 uv sync
 
 # 3. Run the benchmark
-sudo -v && .venv/bin/python tool/local_benchmark.py
+sudo -v && uv run python tool/local_benchmark.py
 ```
 
 The benchmark generates datasets from 10K to 50M rows, runs both baseline and optimized expansions under cold-cache conditions (page cache dropped, PG restarted before each run), and reports the median of 3 measured runs. Requires `sudo` for page cache eviction. Results are saved to `results/local/`.
@@ -47,7 +47,7 @@ Container credentials: user `challenge`, password `challenge`, SSH port 2222, PG
 ## Run the GUI
 
 ```bash
-uv run python -m pgdm
+uv run pgdm
 ```
 
 Connect to `localhost:2222` (SSH) / `localhost:5432` (PG), user `challenge`, password `challenge`. Open `kaggle_challenge` -> `raw_data` -> Expand. Configure 6 destinations in order: `01_table3.sql` -> `public.table3`, ..., `06_table2.sql` -> `public.table2`. Click Run expansion. The `MEASURED PROCESSING TOTAL` in the performance report is the primary metric.
@@ -55,7 +55,7 @@ Connect to `localhost:2222` (SSH) / `localhost:5432` (PG), user `challenge`, pas
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest test/ -v
+uv run pytest test/ -v
 ```
 
 ## Build the paper
